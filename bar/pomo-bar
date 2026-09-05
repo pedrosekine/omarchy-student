@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# pomo-bar — one-line status for the Omarchy bar `command` module.
+# Polls `pomo status` (JSON) and prints bar JSON: {"text":..,"tooltip":..,"class":..}.
+# No deps, no jq. Runs every `interval` seconds from shell.json.
+set -u
+
+s=$(pomo status 2>/dev/null) || s='{"phase":"idle","status":"idle","ends_at":0,"remaining":0,"expired":false}'
+
+phase=$(printf '%s' "$s" | sed -n 's/.*"phase":"\([^"]*\)".*/\1/p')
+status=$(printf '%s' "$s" | sed -n 's/.*"status":"\([^"]*\)".*/\1/p')
+remaining=$(printf '%s' "$s" | sed -n 's/.*"remaining":\([0-9]*\).*/\1/p')
+expired=$(printf '%s' "$s" | sed -n 's/.*"expired":\([a-z]*\).*/\1/p')
+
+phase=${phase:-idle}
+status=${status:-idle}
+remaining=${remaining:-0}
+
+t=$(printf '%d:%02d' $(( remaining / 60 )) $(( remaining % 60 )))
+
+out() { # $1=text $2=tooltip $3=class
+  printf '{"text":"%s","tooltip":"%s","class":"%s"}\n' "$1" "$2" "$3"
+}
+
+if [ "$phase" = "idle" ]; then
+  out "○ --:--" "Pomodoro idle — left-click to start, right-click to skip" ""
+elif [ "${expired:-false}" = "true" ]; then
+  out "● 0:00" "$phase finished — left-click to start next, right-click to skip" ""
+elif [ "$status" = "paused" ]; then
+  out "○ $t" "$phase paused with $t left — left-click to resume" ""
+elif [ "$phase" = "focus" ]; then
+  out "● $t" "Focus — $t left. Left-click pauses, right-click skips to break" ""
+else
+  out "● $t" "Break — $t left. Left-click pauses, right-click skips to focus" ""
+fi

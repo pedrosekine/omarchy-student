@@ -1,0 +1,306 @@
+#!/usr/bin/env bash
+# pomo v0.1 — minimal Pomodoro CLI, no deps (no jq).
+# State: ${XDG_STATE_HOME:-~/.local/state}/omarchy-student-pomodoro/state.json
+set -euo pipefail
+
+FOCUS_LEN=1500  # 25m
+BREAK_LEN=300   # 5m
+
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-student-pomodoro"
+STATE_FILE="$STATE_DIR/state.json"
+
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+SOUND_FILE="$SCRIPT_DIR/../sounds/done.wav"
+[ -f "$SOUND_FILE" ] || SOUND_FILE="/usr/share/sounds/freedesktop/stereo/alarm-clock-elapsed.oga"
+
+play_sound() {
+  if command -v paplay >/dev/null 2>&1; then
+    paplay "$SOUND_FILE" 2>/dev/null &
+  elif command -v aplay >/dev/null 2>&1; then
+    aplay -q "$SOUND_FILE" 2>/dev/null &
+  fi
+  disown 2>/dev/null || true
+}
+
+mkdir -p "$STATE_DIR"
+LOG_FILE="$STATE_DIR/pomo.log"
+
+# Runtime durations (secs). Loaded from state so a custom length chosen via
+# `pomo start <phase> <minutes>` becomes the new default for that phase.
+FOCUS_LEN=$(sed -n 's/.*"focus_len":\([0-9]*\).*/\1/p' "$STATE_FILE" 2>/dev/null | head -1 || true)
+BREAK_LEN=$(sed -n 's/.*"break_len":\([0-9]*\).*/\1/p' "$STATE_FILE" 2>/dev/null | head -1 || true)
+TOTAL=$(sed -n 's/.*"total":\([0-9]*\).*/\1/p' "$STATE_FILE" 2>/dev/null | head -1 || true)
+FOCUS_LEN=${FOCUS_LEN:-1500}
+BREAK_LEN=${BREAK_LEN:-300}
+TOTAL=${TOTAL:-0}
+
+now() { date +%s; }
+
+fmt() { # $1=secs -> m:ss
+  printf '%d:%02d' $(( $1 / 60 )) $(( $1 % 60 ))
+}
+
+report() { # $1=human message -> terminal + log file
+  echo "pomo: $1"
+  printf '%s %s\n' "$(date '+%F %T')" "$1" >> "$LOG_FILE"
+}
+
+# --- state io (we own the format, so sed is enough, no jq) ---
+get() { # $1=key $2=default
+  local key="$1" def="$2" v=""
+  case "$key" in
+    phase|status)
+      v=$(sed -n "s/.*\"$key\":\"\([^\"]*\)\".*/\1/p" "$STATE_FILE" 2>/dev/null | head -1 || true)
+      ;;
+    auto)
+      v=$(sed -n "s/.*\"$key\":\([a-z]*\).*/\1/p" "$STATE_FILE" 2>/dev/null | head -1 || true)
+      ;;
+    *)
+      v=$(sed -n "s/.*\"$key\":\([0-9]*\).*/\1/p" "$STATE_FILE" 2>/dev/null | head -1 || true)
+      ;;
+  esac
+  echo "${v:-$def}"
+}
+
+save() { # $1=phase $2=status $3=ends_at $4=remaining [$5=auto, keeps current when empty]
+  local auto="${5:-$(get auto "false")}"
+  printf '{"phase":"%s","status":"%s","ends_at":%d,"remaining":%d,"auto":%s,"focus_len":%d,"break_len":%d,"total":%d}\n' \
+    "$1" "$2" "$3" "$4" "$auto" "$FOCUS_LEN" "$BREAK_LEN" "$TOTAL" > "$STATE_FILE"
+}
+
+ensure_state() {
+  if [ ! -f "$STATE_FILE" ]; then
+    save "idle" "idle" 0 0
+  fi
+}
+
+live_remaining() { # echoes remaining secs (clamped >=0)
+  local status ends_at remaining n
+  status=$(get status "idle")
+  ends_at=$(get ends_at "0")
+  remaining=$(get remaining "0")
+  n=$(now)
+  if [ "$status" = "running" ]; then
+    echo $(( ends_at - n > 0 ? ends_at - n : 0 ))
+  else
+    echo "$remaining"
+  fi
+}
+
+cmd_start() { # [focus|break] [minutes], default focus + stored length
+  local phase="${1:-focus}" mins="${2:-}" n len
+  case "$phase" in
+    focus|break) ;;
+    *) echo "usage: pomo start [focus|break] [minutes]" >&2; exit 1 ;;
+  esac
+  if [ -n "$mins" ]; then
+    case "$mins" in
+      ''|*[!0-9]*|0) echo "minutes must be a positive number" >&2; exit 1 ;;
+    esac
+    len=$(( mins * 60 ))
+    if [ "$phase" = "focus" ]; then FOCUS_LEN=$len; else BREAK_LEN=$len; fi
+  elif [ "$phase" = "focus" ]; then
+    len=$FOCUS_LEN
+  else
+    len=$BREAK_LEN
+  fi
+  TOTAL=$len
+  n=$(now)
+  if [ "$phase" = "focus" ]; then
+    save "focus" "running" $(( n + len )) "$len"
+    report "focus started · $(fmt "$len")"
+  else
+    save "break" "running" $(( n + len )) "$len"
+    report "break started · $(fmt "$len")"
+  fi
+}
+
+cmd_pause() {
+  local status phase remaining n ends_at
+  ensure_state
+  status=$(get status "idle")
+  if [ "$status" != "running" ]; then
+    report "nothing to pause (status: $status)"
+    exit 0
+  fi
+  phase=$(get phase "focus")
+  ends_at=$(get ends_at "0")
+  n=$(now)
+  remaining=$(( ends_at - n > 0 ? ends_at - n : 0 ))
+  save "$phase" "paused" "$ends_at" "$remaining"
+  report "$phase paused · $(fmt "$remaining") left"
+}
+
+cmd_resume() {
+  local status phase remaining n
+  ensure_state
+  status=$(get status "idle")
+  if [ "$status" != "paused" ]; then
+    report "nothing to resume (status: $status)"
+    exit 0
+  fi
+  phase=$(get phase "focus")
+  remaining=$(get remaining "0")
+  n=$(now)
+  save "$phase" "running" $(( n + remaining )) "$remaining"
+  report "$phase resumed · $(fmt "$remaining") left"
+}
+
+cmd_toggle() {
+  ensure_state
+  case "$(get status "idle")" in
+    running) cmd_pause ;;
+    paused)  cmd_resume ;;
+    *)       cmd_start "focus" ;;
+  esac
+}
+
+cmd_reset() {
+  TOTAL=0
+  save "idle" "idle" 0 0
+  report "reset to idle"
+}
+
+cmd_skip() {
+  ensure_state
+  case "$(get phase "idle")" in
+    focus) cmd_start "break" ;;
+    break) cmd_start "focus" ;;
+    *)     cmd_start "focus" ;;
+  esac
+}
+
+cmd_status() {
+  ensure_state
+  local phase status ends_at remaining n expired="false"
+  phase=$(get phase "idle")
+  status=$(get status "idle")
+  ends_at=$(get ends_at "0")
+  remaining=$(live_remaining)
+  n=$(now)
+  if [ "$status" = "running" ] && [ "$n" -ge "$ends_at" ] && [ "$phase" != "idle" ]; then
+    expired="true"
+  fi
+  printf '{"phase":"%s","status":"%s","ends_at":%d,"remaining":%d,"expired":%s,"auto":%s,"total":%d}\n' \
+    "$phase" "$status" "$ends_at" "$remaining" "$expired" "$(get auto "false")" "$(get total "0")"
+}
+
+count_from() { # $1=start-date (YYYY-MM-DD) -> focus sessions completed since then
+  if [ ! -f "$LOG_FILE" ]; then
+    echo 0
+    return
+  fi
+  awk -v s="$1" '$1 >= s && /focus completed/' "$LOG_FILE" | wc -l
+}
+
+cmd_stats() { # [day|week|month|--json], default day
+  local scope="${1:-day}" today monday month_start d w m n
+  today=$(date +%F)
+  monday=$(date -d "$today - $(( $(date +%u) - 1 )) days" +%F)
+  month_start=$(date +%Y-%m-01)
+  d=$(count_from "$today")
+  w=$(count_from "$monday")
+  m=$(count_from "$month_start")
+  if [ "$scope" = "--json" ]; then
+    printf '{"day":%d,"week":%d,"month":%d}\n' "$d" "$w" "$m"
+    return
+  fi
+  case "$scope" in
+    day)   n=$d; scope="today" ;;
+    week)  n=$w; scope="this week" ;;
+    month) n=$m; scope="this month" ;;
+    *) echo "usage: pomo stats [day|week|month|--json]" >&2; exit 1 ;;
+  esac
+  if [ "$n" -eq 1 ]; then
+    echo "1 focus session $scope"
+  else
+    echo "$n focus sessions $scope"
+  fi
+}
+
+cmd_bell() {
+  ensure_state
+  local phase msg
+  phase=$(get phase "idle")
+  case "$phase" in
+    focus) msg="Focus done — break time" ;;
+    break) msg="Break over — back to focus" ;;
+    *)     msg="Pomodoro" ;;
+  esac
+  notify-send "Pomodoro" "$msg" 2>/dev/null || true
+  play_sound
+  report "bell: $msg"
+}
+
+cmd_autostart() { # [on|off|toggle], no arg prints current state
+  ensure_state
+  local cur="${1:-status}" auto next
+  auto=$(get auto "false")
+  case "$cur" in
+    on)     next="true" ;;
+    off)    next="false" ;;
+    toggle) [ "$auto" = "true" ] && next="false" || next="true" ;;
+    status) echo "auto-start $auto"; return ;;
+    *) echo "usage: pomo autostart [on|off|toggle]" >&2; exit 1 ;;
+  esac
+  local phase status ends_at remaining
+  phase=$(get phase "idle")
+  status=$(get status "idle")
+  ends_at=$(get ends_at "0")
+  remaining=$(get remaining "0")
+  save "$phase" "$status" "$ends_at" "$remaining" "$next"
+  report "auto-start $next"
+}
+
+cmd_expired() {
+  # Edge handler: call when a running phase may have hit zero.
+  # Rings the bell for the finished phase, then auto-starts the next
+  # phase when auto-start is on. Silent unless something actually expired.
+  ensure_state
+  local phase status ends_at n auto msg next
+  phase=$(get phase "idle")
+  status=$(get status "idle")
+  ends_at=$(get ends_at "0")
+  n=$(now)
+  if [ "$status" != "running" ] || [ "$phase" = "idle" ] || [ "$n" -lt "$ends_at" ]; then
+    exit 0
+  fi
+  if [ "$phase" = "focus" ]; then
+    msg="Focus done — break time"
+    next="break"
+  else
+    msg="Break over — back to focus"
+    next="focus"
+  fi
+  if [ "$TOTAL" -le 0 ]; then
+    if [ "$phase" = "focus" ]; then TOTAL=$FOCUS_LEN; else TOTAL=$BREAK_LEN; fi
+  fi
+  report "$phase completed · $(fmt "$TOTAL")"
+  notify-send "Pomodoro" "$msg" 2>/dev/null || true
+  play_sound
+  auto=$(get auto "false")
+  if [ "$auto" = "true" ]; then
+    cmd_start "$next"
+  fi
+}
+
+usage() {
+  echo "usage: pomo start [focus|break] [minutes] | pause | resume | toggle | reset | skip | status | stats [day|week|month|--json] | bell | autostart [on|off|toggle] | expired" >&2
+}
+
+ensure_state
+case "${1:-}" in
+  start)  shift; cmd_start "${1:-focus}" "${2:-}" ;;
+  pause)  cmd_pause ;;
+  resume) cmd_resume ;;
+  toggle) cmd_toggle ;;
+  reset)  cmd_reset ;;
+  skip)   cmd_skip ;;
+  status) cmd_status ;;
+  stats)  shift; cmd_stats "${1:-day}" ;;
+  bell)   cmd_bell ;;
+  autostart) shift; cmd_autostart "${1:-status}" ;;
+  expired) cmd_expired ;;
+  -h|--help|help|"") usage; exit 1 ;;
+  *) echo "unknown command: $1" >&2; usage; exit 1 ;;
+esac

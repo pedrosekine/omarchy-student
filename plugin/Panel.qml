@@ -18,6 +18,11 @@ Panel {
   readonly property color dim: Qt.darker(foreground, 1.55)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
+  // Open-panel underline hint: span the painted label ("○ --:--") instead of
+  // the bar's 55%-of-slot fallback, which floats over the middle of the text.
+  readonly property real openPanelIndicatorWidth: button.labelWidth
+  readonly property real openPanelIndicatorHeight: Math.max(Style.space(10), Math.round(Style.bar.iconSlot * 0.55))
+
   // Counter scope toggle: 0 = day, 1 = week, 2 = month.
   property int scopeIndex: 0
 
@@ -47,9 +52,87 @@ Panel {
     root.entryDigits = ""
   }
 
+  // Keyboard grid cursor. The panel is treated as a grid: row 0 is the
+  // timer + action buttons, row 1 the presets (idle only), then scope and
+  // auto-start. Arrows move the cursor (column preserved when moving
+  // vertically), Enter/Space activate the cell, and mouse hover drives the
+  // same state so exactly one highlight is on screen at any time.
+  property bool cursorActive: false
+  property int cursorRow: 0
+  property int cursorCol: 0
+
+  // Row addresses shift when the preset row collapses outside idle.
+  readonly property int scopeRow: svc.phase === "idle" ? 2 : 1
+  readonly property int autoRow: svc.phase === "idle" ? 3 : 2
+
+  function gridRows() {
+    return svc.phase === "idle" ? 4 : 3
+  }
+
+  function gridCols(row) {
+    if (row === 0) return 4
+    if (row === 1) return svc.phase === "idle" ? 4 : 3
+    if (row === 2) return svc.phase === "idle" ? 3 : 1
+    return 1
+  }
+
+  function cellHot(row, col) {
+    return root.cursorActive && root.cursorRow === row && root.cursorCol === col
+  }
+
+  function clampCursor() {
+    root.cursorRow = Math.max(0, Math.min(root.gridRows() - 1, root.cursorRow))
+    root.cursorCol = Math.max(0, Math.min(root.gridCols(root.cursorRow) - 1, root.cursorCol))
+  }
+
+  function moveCursor(dx, dy) {
+    if (!root.cursorActive) {
+      root.cursorActive = true
+      root.clampCursor()
+      return
+    }
+    if (dx !== 0) root.cursorCol += dx
+    if (dy !== 0) root.cursorRow += dy
+    root.clampCursor()
+  }
+
+  function hoverCursor(row, col) {
+    root.cursorActive = true
+    root.cursorRow = row
+    root.cursorCol = col
+  }
+
+  function activateCursor() {
+    if (!root.cursorActive) return
+    var r = root.cursorRow
+    var c = root.cursorCol
+    if (r === 0) {
+      if (c === 0) { if (svc.phase === "idle") idleTimer.focus = true; else svc.toggle() }
+      else if (c === 1) svc.toggle()
+      else if (c === 2) svc.skip()
+      else svc.reset()
+    } else if (r === 1) {
+      if (svc.phase === "idle") svc.startFocus([15, 25, 45, 60][c])
+      else root.scopeIndex = c
+    } else if (r === 2) {
+      if (svc.phase === "idle") root.scopeIndex = c
+      else svc.autostartToggle()
+    } else svc.autostartToggle()
+  }
+
+  Connections {
+    target: svc
+    function onPhaseChanged() { root.clampCursor() }
+  }
+
   onOpenedChanged: {
-    if (opened && svc.phase === "idle") idleTimer.focus = true
-    else if (!opened) root.entryDigits = ""
+    console.debug("pomo-debug opened", opened, "phase", svc.phase)
+    if (opened) {
+      root.cursorActive = false
+      root.cursorRow = 0
+      root.cursorCol = 0
+      if (svc.phase === "idle") idleTimer.focus = true
+    } else root.entryDigits = ""
   }
 
   function scopeCount() {
@@ -89,6 +172,7 @@ Panel {
     owner: root
     bar: root.bar
     open: root.opened
+    focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(300))
     contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(400))
 
@@ -96,6 +180,13 @@ Panel {
       id: keyCatcher
       anchors.fill: parent
       onCloseRequested: root.close()
+      onMoveRequested: function (dx, dy) {
+        console.debug("pomo-debug move", dx, dy, "cursorActive", root.cursorActive)
+        // Leaving the duration entry returns control to the grid cursor.
+        if (idleTimer.activeFocus) idleTimer.focus = false
+        root.moveCursor(dx, dy)
+      }
+      onActivateRequested: root.activateCursor()
       onTabRequested: function (direction) {
         root.switchPanel(direction)
       }
@@ -109,24 +200,33 @@ Panel {
           width: parent.width
           spacing: Style.space(12)
 
+        CursorSurface {
+          id: timerCell
+          Layout.fillWidth: true
+          Layout.alignment: Qt.AlignVCenter
+          implicitHeight: idleTimer.implicitHeight + Style.space(8)
+          hasCursor: root.cellHot(0, 0)
+          foreground: root.foreground
+
+          MouseArea {
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onContainsMouseChanged: if (containsMouse) root.hoverCursor(0, 0)
+            onClicked: if (svc.phase === "idle") idleTimer.focus = true; else svc.toggle()
+          }
+
           Text {
             id: idleTimer
             visible: svc.phase === "idle"
-            Layout.preferredWidth: Style.space(110)
-            Layout.alignment: Qt.AlignVCenter
+            anchors.left: parent.left
+            anchors.leftMargin: Style.space(6)
+            anchors.verticalCenter: parent.verticalCenter
             textFormat: Text.PlainText
-            horizontalAlignment: Text.AlignLeft
             text: root.entryText()
             color: root.entryDigits === "" ? root.dim : root.foreground
             font.family: root.fontFamily
             font.pixelSize: Style.font.display
-
-            MouseArea {
-              anchors.fill: parent
-              hoverEnabled: true
-              cursorShape: Qt.PointingHandCursor
-              onClicked: idleTimer.focus = true
-            }
 
             Keys.onPressed: function (event) {
               if (event.key >= Qt.Key_0 && event.key <= Qt.Key_9) {
@@ -139,33 +239,30 @@ Panel {
             }
             Keys.onReturnPressed: root.startFromEntry()
             Keys.onEnterPressed: root.startFromEntry()
-            Keys.onEscapePressed: idleTimer.focus = false
+            Keys.onEscapePressed: root.close()
           }
 
           Text {
+            id: runTimer
             visible: svc.phase !== "idle"
-            Layout.fillWidth: true
-            Layout.alignment: Qt.AlignVCenter
+            anchors.left: parent.left
+            anchors.leftMargin: Style.space(6)
+            anchors.verticalCenter: parent.verticalCenter
             textFormat: Text.PlainText
-            horizontalAlignment: Text.AlignLeft
             text: svc.fmt(svc.remaining)
             color: root.foreground
             font.family: root.fontFamily
             font.pixelSize: Style.font.display
-
-            MouseArea {
-              anchors.fill: parent
-              hoverEnabled: true
-              cursorShape: Qt.PointingHandCursor
-              onClicked: svc.toggle()
-            }
           }
+        }
 
           PanelActionButton {
             Layout.alignment: Qt.AlignVCenter
             foreground: root.foreground
             iconText: svc.runStatus === "running" && !svc.expired ? "\uf04c" : "\uf04b"
-            tooltipText: svc.runStatus === "running" && !svc.expired ? "Pause" : "Resume"
+            tooltipText: svc.expired ? "Start next phase" : svc.runStatus === "running" ? "Pause" : "Resume"
+            hasCursor: root.cellHot(0, 1)
+            onHovered: function (h) { if (h) root.hoverCursor(0, 1) }
             onClicked: svc.toggle()
           }
 
@@ -174,6 +271,8 @@ Panel {
             foreground: root.foreground
             iconText: "\uf051"
             tooltipText: "Skip to next phase"
+            hasCursor: root.cellHot(0, 2)
+            onHovered: function (h) { if (h) root.hoverCursor(0, 2) }
             onClicked: svc.skip()
           }
 
@@ -182,6 +281,8 @@ Panel {
             foreground: root.foreground
             iconText: "\uf021"
             tooltipText: "Reset to idle"
+            hasCursor: root.cellHot(0, 3)
+            onHovered: function (h) { if (h) root.hoverCursor(0, 3) }
             onClicked: svc.reset()
           }
         }
@@ -194,32 +295,21 @@ Panel {
           Repeater {
             model: [15, 25, 45, 60]
 
-            Rectangle {
+            Button {
               required property int modelData
+              required property int index
 
               Layout.fillWidth: true
-              implicitHeight: pickLabel.implicitHeight + Style.space(12)
-              radius: Style.space(4)
-              color: "transparent"
-              border.color: root.dim
-              border.width: 1
-
-              Text {
-                id: pickLabel
-                anchors.centerIn: parent
-                textFormat: Text.PlainText
-                text: parent.modelData + " min"
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-              }
-
-              MouseArea {
-                anchors.fill: parent
-                hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor
-                onClicked: svc.startFocus(parent.modelData)
-              }
+              text: modelData + " min"
+              fontSize: Style.font.bodySmall
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              horizontalPadding: Style.spacing.controlPaddingX
+              verticalPadding: Style.spacing.controlPaddingY + Style.space(2)
+              bordered: true
+              hasCursor: root.cellHot(1, index)
+              onHovered: function (h) { if (h) root.hoverCursor(1, index) }
+              onClicked: svc.startFocus(modelData)
             }
           }
         }
@@ -267,58 +357,69 @@ Panel {
           Repeater {
             model: ["Day", "Week", "Month"]
 
-            Rectangle {
+            Button {
               required property string modelData
               required property int index
 
-              readonly property bool selected: root.scopeIndex === index
-
               Layout.fillWidth: true
-              implicitHeight: segLabel.implicitHeight + Style.space(12)
-              radius: Style.space(4)
-              color: selected ? root.dim : "transparent"
-              border.color: root.dim
-              border.width: 1
-
-              Text {
-                id: segLabel
-                anchors.centerIn: parent
-                textFormat: Text.PlainText
-                text: parent.modelData
-                color: selected ? root.foreground : root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-              }
-
-              MouseArea {
-                anchors.fill: parent
-                hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor
-                onClicked: root.scopeIndex = parent.index
-              }
+              text: modelData
+              fontSize: Style.font.bodySmall
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              horizontalPadding: Style.spacing.controlPaddingX
+              verticalPadding: Style.spacing.controlPaddingY + Style.space(2)
+              bordered: true
+              active: root.scopeIndex === index
+              hasCursor: root.cellHot(root.scopeRow, index)
+              onHovered: function (h) { if (h) root.hoverCursor(root.scopeRow, index) }
+              onClicked: root.scopeIndex = index
             }
           }
         }
 
-        RowLayout {
-          width: parent.width
-          spacing: Style.space(8)
+        CursorSurface {
+          id: autoRow
+          hasCursor: root.cellHot(root.autoRow, 0)
+          foreground: root.foreground
 
-          Text {
-            Layout.fillWidth: true
-            textFormat: Text.PlainText
-            verticalAlignment: Text.AlignVCenter
-            text: "Auto-start breaks & focus"
-            color: root.foreground
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.bodySmall
+          Layout.fillWidth: true
+          implicitHeight: Math.max(autoLabel.implicitHeight, autoToggle.implicitHeight) + Style.space(10)
+
+          MouseArea {
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onContainsMouseChanged: if (containsMouse) root.hoverCursor(root.autoRow, 0)
+            onClicked: svc.autostartToggle()
           }
 
-          ToggleSwitch {
-            Layout.alignment: Qt.AlignVCenter
-            checked: svc.autoStart
-            foreground: root.foreground
-            onToggled: svc.autostartToggle()
+          RowLayout {
+            anchors.fill: parent
+            anchors.leftMargin: Style.space(6)
+            anchors.rightMargin: Style.space(6)
+            spacing: Style.space(8)
+
+            Text {
+              id: autoLabel
+              Layout.fillWidth: true
+              textFormat: Text.PlainText
+              verticalAlignment: Text.AlignVCenter
+              text: "Auto-start breaks & focus"
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            ToggleSwitch {
+              id: autoToggle
+              Layout.alignment: Qt.AlignVCenter
+              checked: svc.autoStart
+              foreground: root.foreground
+              interactive: false
+              hasCursor: autoRow.hasCursor
+              onHovered: function (h) { if (h) root.hoverCursor(root.autoRow, 0) }
+              onToggled: svc.autostartToggle()
+            }
           }
         }
       }

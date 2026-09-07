@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "student.deadline",
+  "name": "Deadlines",
+  "version": "0.1.0",
+  "author": "student",
+  "description": "Countdown to your next deadline in the bar, upcoming list on click",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Deadlines",
+    "description": "Countdown to your next deadline",
+    "category": "Time",
+    "allowMultiple": false,
+    "defaultSection": "center"
+  }
+}

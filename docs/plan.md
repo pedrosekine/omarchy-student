@@ -19,7 +19,15 @@
 - [x] Step 9 — popup controls: icon buttons (play/pause, skip, reset) side by side; tap-timer duration picker (15/25/45/60 min chips when idle, tap toggles picker, tap while running pauses/resumes). CLI `pomo start [focus|break] [minutes]` with per-phase default persisted (`focus_len`/`break_len`/`total` in state.json).
 - [x] Step 10 — typed minutes (idle timer is a minutes field, Enter starts) + completions-only counting (`focus completed` logged at expiry; CLI stats + popup recount).
 - [x] Step 11 — microwave-style entry, no caret: plain focusable Text (cursor impossible), digits shift in (--:-2 → --:25 → 25:00 → 250:00), Backspace deletes, Enter starts, Escape blurs.
-- [ ] Later — daily counter, analytics (`history`, `stats`), calendar (CalDAV/ICS)
+- [x] Step 12 — deadlines (manual): `pomo deadline add|list|rm|next`, stored as
+      `deadlines.tsv` (`id<TAB>epoch<TAB>title`). Free-text dates via `date -d`
+      ("next friday 17:00", "in 3 hours", "3d", "by friday"); a bare day snaps to
+      23:59 because a deadline means the end of that day. New `student.deadline`
+      bar widget (`plugin-deadline/`): calendar glyph + countdown to the next
+      deadline, urgent-coloured inside 24h, popup lists the next 6 with `x` to
+      remove. Installed alongside `student.pomo` in the bar's center section.
+- [ ] Later — deadline entry from the popup, `.ics` import for whoever *does*
+      have a working feed, analytics (`history`), daily counter
 
 ## v0.1 Keyboard contract
 ```bash
@@ -37,4 +45,11 @@ o.bind("SUPER + ALT + O", "Pomo popup", "omarchy-shell student.pomo toggle")
 
 ## Decisions
 - 2026-09-05: Hybrid, name omarchy-student-pomodoro, v0.1 = keyboard shortcuts
+- 2026-09-07: Deadlines are manual-first and stay that way. Import was weighed
+  and rejected for now: over years of study the feeds were "nothing but chaotic",
+  and the deadlines that drive a study week (read ch.7, draft by Sunday, meet
+  supervisor) never live in an LMS anyway. So entry has to be forgiving, and the
+  store is deliberately shaped for a later read-only ICS sync — imported items
+  would land in a separate file, keyed by UID, never written back, so "sync" is
+  refetch-and-replace with no merge logic.
 - 2026-09-05: Calendar parked — direct Google/Outlook sync needs two OAuth flows, too heavy. When revisited, start with local `.ics` export (importable anywhere), not live sync. Next: daily counter.

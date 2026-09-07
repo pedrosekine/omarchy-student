@@ -24,6 +24,8 @@ play_sound() {
 
 mkdir -p "$STATE_DIR"
 LOG_FILE="$STATE_DIR/pomo.log"
+DEADLINE_FILE="$STATE_DIR/deadlines.tsv"
+TAB=$'\t'
 
 # Runtime durations (secs). Loaded from state so a custom length chosen via
 # `pomo start <phase> <minutes>` becomes the new default for that phase.
@@ -80,11 +82,22 @@ live_remaining() { # echoes remaining secs (clamped >=0)
   ends_at=$(get ends_at "0")
   remaining=$(get remaining "0")
   n=$(now)
-  if [ "$status" = "running" ]; then
+  if [ "$status" = "done" ]; then
+    echo 0
+  elif [ "$status" = "running" ]; then
     echo $(( ends_at - n > 0 ? ends_at - n : 0 ))
   else
     echo "$remaining"
   fi
+}
+
+is_expired_running() { # true (0) when a running phase has hit zero but not yet completed
+  local status phase ends_at n
+  status=$(get status "idle")
+  phase=$(get phase "idle")
+  ends_at=$(get ends_at "0")
+  n=$(now)
+  [ "$status" = "running" ] && [ "$phase" != "idle" ] && [ "$n" -ge "$ends_at" ]
 }
 
 cmd_start() { # [focus|break] [minutes], default focus + stored length
@@ -119,8 +132,18 @@ cmd_pause() {
   local status phase remaining n ends_at
   ensure_state
   status=$(get status "idle")
+  if [ "$status" = "done" ]; then
+    report "$(get phase "focus") finished — use toggle/skip to start next"
+    exit 0
+  fi
   if [ "$status" != "running" ]; then
     report "nothing to pause (status: $status)"
+    exit 0
+  fi
+  if is_expired_running; then
+    # Finished but not yet completed: log it once instead of pausing a 0:00 timer
+    # (pausing here used to allow a resume+re-expiry that double-counted).
+    cmd_expired
     exit 0
   fi
   phase=$(get phase "focus")
@@ -135,12 +158,25 @@ cmd_resume() {
   local status phase remaining n
   ensure_state
   status=$(get status "idle")
+  if [ "$status" = "done" ]; then
+    report "$(get phase "focus") finished — use toggle/skip to start next"
+    exit 0
+  fi
   if [ "$status" != "paused" ]; then
     report "nothing to resume (status: $status)"
     exit 0
   fi
-  phase=$(get phase "focus")
   remaining=$(get remaining "0")
+  if [ "$remaining" -le 0 ]; then
+    # Legacy expired-paused state (paused at 0:00 before the done fix):
+    # mark finished instead of resuming a timer that would instantly re-expire
+    # and log a duplicate completion.
+    phase=$(get phase "focus")
+    save "$phase" "done" "$(get ends_at "0")" 0
+    report "$phase finished — use toggle/skip to start next"
+    exit 0
+  fi
+  phase=$(get phase "focus")
   n=$(now)
   save "$phase" "running" $(( n + remaining )) "$remaining"
   report "$phase resumed · $(fmt "$remaining") left"
@@ -148,7 +184,36 @@ cmd_resume() {
 
 cmd_toggle() {
   ensure_state
-  case "$(get status "idle")" in
+  local status
+  status=$(get status "idle")
+  if [ "$status" = "done" ]; then
+    # Finished session acknowledged: start the next phase.
+    case "$(get phase "idle")" in
+      focus) cmd_start "break" ;;
+      break) cmd_start "focus" ;;
+      *)     cmd_start "focus" ;;
+    esac
+    return
+  fi
+  if [ "$status" = "paused" ] && [ "$(get remaining "0")" -le 0 ]; then
+    # Legacy expired-paused state: same as done, start next (completion already logged).
+    cmd_resume # converts to done + reports
+    return
+  fi
+  if is_expired_running; then
+    # Expired but completion not logged yet: log once, then start next
+    # (unless auto-start already advanced us).
+    cmd_expired
+    if [ "$(get status "idle")" = "done" ]; then
+      case "$(get phase "idle")" in
+        focus) cmd_start "break" ;;
+        break) cmd_start "focus" ;;
+        *)     cmd_start "focus" ;;
+      esac
+    fi
+    return
+  fi
+  case "$status" in
     running) cmd_pause ;;
     paused)  cmd_resume ;;
     *)       cmd_start "focus" ;;
@@ -163,6 +228,23 @@ cmd_reset() {
 
 cmd_skip() {
   ensure_state
+  if [ "$(get status "idle")" = "done" ]; then
+    case "$(get phase "idle")" in
+      focus) cmd_start "break" ;;
+      break) cmd_start "focus" ;;
+      *)     cmd_start "focus" ;;
+    esac
+    return
+  fi
+  if is_expired_running; then
+    # Skipping a just-finished phase: make sure the completion is logged once.
+    # cmd_expired auto-starts next when auto is on (then we're done);
+    # otherwise it marks done and we advance below.
+    cmd_expired
+    if [ "$(get status "idle")" = "running" ]; then
+      return
+    fi
+  fi
   case "$(get phase "idle")" in
     focus) cmd_start "break" ;;
     break) cmd_start "focus" ;;
@@ -178,7 +260,9 @@ cmd_status() {
   ends_at=$(get ends_at "0")
   remaining=$(live_remaining)
   n=$(now)
-  if [ "$status" = "running" ] && [ "$n" -ge "$ends_at" ] && [ "$phase" != "idle" ]; then
+  if [ "$status" = "done" ]; then
+    expired="true"
+  elif [ "$status" = "running" ] && [ "$n" -ge "$ends_at" ] && [ "$phase" != "idle" ]; then
     expired="true"
   fi
   printf '{"phase":"%s","status":"%s","ends_at":%d,"remaining":%d,"expired":%s,"auto":%s,"total":%d}\n' \
@@ -254,14 +338,18 @@ cmd_autostart() { # [on|off|toggle], no arg prints current state
 
 cmd_expired() {
   # Edge handler: call when a running phase may have hit zero.
-  # Rings the bell for the finished phase, then auto-starts the next
-  # phase when auto-start is on. Silent unless something actually expired.
+  # Rings the bell for the finished phase once, persists a "done" state,
+  # then auto-starts the next phase when auto-start is on.
+  # Silent + idempotent unless something actually expired.
   ensure_state
   local phase status ends_at n auto msg next
   phase=$(get phase "idle")
   status=$(get status "idle")
   ends_at=$(get ends_at "0")
   n=$(now)
+  if [ "$status" = "done" ]; then
+    exit 0
+  fi
   if [ "$status" != "running" ] || [ "$phase" = "idle" ] || [ "$n" -lt "$ends_at" ]; then
     exit 0
   fi
@@ -281,11 +369,164 @@ cmd_expired() {
   auto=$(get auto "false")
   if [ "$auto" = "true" ]; then
     cmd_start "$next"
+  else
+    # Persist completion so a later pause/resume/toggle can't re-expire
+    # the same finished timer and double-count it.
+    save "$phase" "done" "$ends_at" 0
   fi
+}
+
+# --- deadlines (manual entry; "id<TAB>epoch<TAB>title" per line, no jq) ---
+# Deadlines are typed by hand on purpose: university feeds are unreliable or
+# missing, and the deadlines that matter most (read ch.7, draft by Sunday) never
+# live in one anyway. Entry has to be forgiving, so `date -d` does the parsing.
+
+parse_when() { # $1=free date text -> epoch
+  local when="$1" ts norm
+  # Forgiving input: strip the filler words people actually type ("in 3 hours",
+  # "by friday", "due monday") and expand "3d"/"2w" shorthand, then let GNU
+  # date do the real work.
+  norm=$(printf '%s' "$when" | sed -E 's/^[[:space:]]*(in|by|on|at|due|until|till)[[:space:]]+//I; s/[[:space:]]+$//')
+  case "$norm" in
+    [0-9]*[hH]) norm="${norm%[hH]} hours" ;;
+    [0-9]*[dD]) norm="${norm%[dD]} days" ;;
+    [0-9]*[wW]) norm="${norm%[wW]} weeks" ;;
+  esac
+  ts=$(date -d "$norm" +%s 2>/dev/null) || return 1
+  # A bare day ("friday", "tomorrow", "2026-09-12") parses to 00:00, which as a
+  # deadline means the *start* of the day nobody intends. Land on its end
+  # instead. Anything carrying a real time ("friday 17:00", "3 hours") is
+  # already off midnight and passes through untouched.
+  if [ "$(date -d "@$ts" +%H%M%S)" = "000000" ]; then
+    ts=$(date -d "$(date -d "@$ts" +%F) 23:59" +%s)
+  fi
+  echo "$ts"
+}
+
+when_text() { # $1=epoch -> "Fri 12 Sep 23:59"
+  date -d "@$1" '+%a %d %b %H:%M'
+}
+
+rel() { # $1=epoch -> "in 4d" / "in 3h" / "5m late"
+  local d a unit
+  d=$(( $1 - $(now) ))
+  a=${d#-}
+  if [ "$a" -ge 86400 ]; then unit="$(( a / 86400 ))d"
+  elif [ "$a" -ge 3600 ]; then unit="$(( a / 3600 ))h"
+  else unit="$(( a / 60 ))m"
+  fi
+  if [ "$d" -lt 0 ]; then echo "$unit late"; else echo "in $unit"; fi
+}
+
+next_id() {
+  [ -s "$DEADLINE_FILE" ] || { echo 1; return; }
+  awk -F'\t' '$1+0 > m { m = $1+0 } END { print m + 1 }' m=0 "$DEADLINE_FILE"
+}
+
+sorted_deadlines() {
+  sort -t"$TAB" -k2,2n "$DEADLINE_FILE"
+}
+
+cmd_deadline_add() { # <title> <when...>
+  local title="${1:-}" when ts id
+  shift 2>/dev/null || true
+  when="$*"
+  if [ -z "$title" ] || [ -z "$when" ]; then
+    echo 'usage: pomo deadline add <title> <when...>' >&2
+    echo '  e.g. pomo deadline add "Essay draft" next friday 17:00' >&2
+    exit 1
+  fi
+  if ! ts=$(parse_when "$when"); then
+    echo "pomo: can't read a date out of \"$when\"" >&2
+    exit 1
+  fi
+  title=${title//"$TAB"/ }
+  id=$(next_id)
+  printf '%d\t%d\t%s\n' "$id" "$ts" "$title" >> "$DEADLINE_FILE"
+  report "deadline #$id · $(when_text "$ts") · $title"
+}
+
+cmd_deadline_list() { # [--json]
+  if [ ! -s "$DEADLINE_FILE" ]; then
+    if [ "${1:-}" = "--json" ]; then
+      echo '{"deadlines":[]}'
+    else
+      echo 'no deadlines — pomo deadline add "Essay draft" friday'
+    fi
+    return
+  fi
+  if [ "${1:-}" = "--json" ]; then
+    sorted_deadlines | awk -F'\t' '
+      BEGIN { printf "{\"deadlines\":[" }
+      {
+        t = $3
+        gsub(/\\/, "\\\\", t)
+        gsub(/"/, "\\\"", t)
+        printf "%s{\"id\":%d,\"due\":%d,\"title\":\"%s\"}", (NR > 1 ? "," : ""), $1, $2, t
+      }
+      END { print "]}" }'
+    return
+  fi
+  local id ts title
+  sorted_deadlines | while IFS="$TAB" read -r id ts title; do
+    printf '%3s  %-17s %-9s %s\n' "$id" "$(when_text "$ts")" "$(rel "$ts")" "$title"
+  done
+}
+
+cmd_deadline_rm() { # <id>
+  local id="${1:-}" tmp
+  case "$id" in
+    ''|*[!0-9]*) echo "usage: pomo deadline rm <id>" >&2; exit 1 ;;
+  esac
+  if [ ! -s "$DEADLINE_FILE" ] || ! awk -F'\t' -v id="$id" '$1+0 == id+0 { f = 1 } END { exit !f }' "$DEADLINE_FILE"; then
+    echo "pomo: no deadline #$id" >&2
+    exit 1
+  fi
+  tmp=$(mktemp "$DEADLINE_FILE.XXXXXX")
+  awk -F'\t' -v id="$id" '$1+0 != id+0' "$DEADLINE_FILE" > "$tmp"
+  mv "$tmp" "$DEADLINE_FILE"
+  report "deadline #$id removed"
+}
+
+cmd_deadline_next() { # [--json] -> soonest upcoming, else least-late overdue
+  local line id ts title
+  if [ -s "$DEADLINE_FILE" ]; then
+    # First upcoming wins; when everything has passed, fall back to the last
+    # (least late) one. The bar widget picks the same way.
+    line=$(sorted_deadlines | awk -F'\t' -v n="$(now)" '
+      $2+0 >= n { print; found = 1; exit }
+      { last = $0 }
+      END { if (!found && last != "") print last }')
+  fi
+  if [ -z "${line:-}" ]; then
+    [ "${1:-}" = "--json" ] && echo '{"next":null}' || echo "no deadlines"
+    return
+  fi
+  IFS="$TAB" read -r id ts title <<< "$line"
+  if [ "${1:-}" = "--json" ]; then
+    printf '{"next":{"id":%d,"due":%d,"title":"%s"}}\n' "$id" "$ts" \
+      "$(printf '%s' "$title" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+  else
+    printf '#%s  %s  %s  %s\n' "$id" "$(when_text "$ts")" "$(rel "$ts")" "$title"
+  fi
+}
+
+cmd_deadline() {
+  local sub="${1:-list}"
+  shift 2>/dev/null || true
+  case "$sub" in
+    add)      cmd_deadline_add "$@" ;;
+    list|ls)  cmd_deadline_list "${1:-}" ;;
+    rm|remove) cmd_deadline_rm "${1:-}" ;;
+    next)     cmd_deadline_next "${1:-}" ;;
+    --json)   cmd_deadline_list --json ;;
+    *) echo "usage: pomo deadline [add <title> <when...> | list [--json] | rm <id> | next [--json]]" >&2; exit 1 ;;
+  esac
 }
 
 usage() {
   echo "usage: pomo start [focus|break] [minutes] | pause | resume | toggle | reset | skip | status | stats [day|week|month|--json] | bell | autostart [on|off|toggle] | expired" >&2
+  echo "       pomo deadline [add <title> <when...> | list [--json] | rm <id> | next [--json]]" >&2
 }
 
 ensure_state
@@ -301,6 +542,7 @@ case "${1:-}" in
   bell)   cmd_bell ;;
   autostart) shift; cmd_autostart "${1:-status}" ;;
   expired) cmd_expired ;;
+  deadline|deadlines) shift; cmd_deadline "$@" ;;
   -h|--help|help|"") usage; exit 1 ;;
   *) echo "unknown command: $1" >&2; usage; exit 1 ;;
 esac

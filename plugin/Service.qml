@@ -15,7 +15,7 @@ Item {
 
   // Raw state from the file.
   property string phase: "idle" // idle | focus | break
-  property string runStatus: "idle" // idle | running | paused
+  property string runStatus: "idle" // idle | running | paused | done
   property int endsAt: 0
   property int storedRemaining: 0
   property bool autoStart: false
@@ -28,7 +28,7 @@ Item {
   // Fallback for sessions started before total was stored.
   readonly property int effTotal: total > 0 ? total : phase === "focus" ? focusLen : phase === "break" ? breakLen : 0
 
-  readonly property bool expired: runStatus === "running" && phase !== "idle" && endsAt > 0 && nowSec >= endsAt
+  readonly property bool expired: (runStatus === "done") || (runStatus === "running" && phase !== "idle" && endsAt > 0 && nowSec >= endsAt)
   readonly property bool live: runStatus === "running" && !expired
   readonly property real progress: effTotal > 0 ? Math.max(0, Math.min(1, 1 - remaining / effTotal)) : 0
 
@@ -48,6 +48,8 @@ Item {
     : phase === "break" ? "Break" : "Pomodoro"
 
   // Expiry edge detection: ring once when a running phase hits zero.
+  // The CLI persists a "done" status on completion, so re-ticks (or a
+  // pause/resume cycle on the finished timer) can't re-fire and double-count.
   // firstTick avoids a spurious bell when the shell (re)starts mid-expiry.
   property bool prevExpired: false
   property bool firstTick: true

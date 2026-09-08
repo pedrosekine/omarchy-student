@@ -370,9 +370,12 @@ cmd_expired() {
   if [ "$auto" = "true" ]; then
     cmd_start "$next"
   else
-    # Persist completion so a later pause/resume/toggle can't re-expire
-    # the same finished timer and double-count it.
-    save "$phase" "done" "$ends_at" 0
+    # Arm the next phase at full length in a paused "ready" state: the timer
+    # visibly resets to what's next without playing. The finished phase was
+    # already logged above, so the completion can't be double-counted.
+    if [ "$next" = "focus" ]; then len=$FOCUS_LEN; else len=$BREAK_LEN; fi
+    TOTAL=$len
+    save "$next" "paused" 0 "$len"
   fi
 }
 

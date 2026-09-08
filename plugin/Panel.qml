@@ -260,7 +260,7 @@ Panel {
             Layout.alignment: Qt.AlignVCenter
             foreground: root.foreground
             iconText: svc.runStatus === "running" && !svc.expired ? "\uf04c" : "\uf04b"
-            tooltipText: svc.expired ? "Start next phase" : svc.runStatus === "running" ? "Pause" : "Resume"
+            tooltipText: svc.expired ? "Start next phase" : svc.runStatus === "running" ? "Pause" : svc.ready ? "Start" : "Resume"
             hasCursor: root.cellHot(0, 1)
             onHovered: function (h) { if (h) root.hoverCursor(0, 1) }
             onClicked: svc.toggle()
@@ -334,7 +334,7 @@ Panel {
           visible: svc.effTotal > 0
           width: parent.width
           horizontalAlignment: Text.AlignLeft
-          text: svc.fmt(svc.effTotal - svc.remaining) + " elapsed · " + svc.fmt(svc.remaining) + " left"
+          text: "Up next: " + (svc.phase === "focus" ? "break " : "focus ") + svc.fmt(svc.phase === "focus" ? svc.breakLen : svc.focusLen)
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption

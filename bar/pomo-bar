@@ -9,11 +9,13 @@ s=$(pomo status 2>/dev/null) || s='{"phase":"idle","status":"idle","ends_at":0,"
 phase=$(printf '%s' "$s" | sed -n 's/.*"phase":"\([^"]*\)".*/\1/p')
 status=$(printf '%s' "$s" | sed -n 's/.*"status":"\([^"]*\)".*/\1/p')
 remaining=$(printf '%s' "$s" | sed -n 's/.*"remaining":\([0-9]*\).*/\1/p')
+total=$(printf '%s' "$s" | sed -n 's/.*"total":\([0-9]*\).*/\1/p')
 expired=$(printf '%s' "$s" | sed -n 's/.*"expired":\([a-z]*\).*/\1/p')
 
 phase=${phase:-idle}
 status=${status:-idle}
 remaining=${remaining:-0}
+total=${total:-0}
 
 t=$(printf '%d:%02d' $(( remaining / 60 )) $(( remaining % 60 )))
 
@@ -26,7 +28,11 @@ if [ "$phase" = "idle" ]; then
 elif [ "${expired:-false}" = "true" ]; then
   out "● 0:00" "$phase finished — left-click to start next, right-click to skip" ""
 elif [ "$status" = "paused" ]; then
-  out "○ $t" "$phase paused with $t left — left-click to resume" ""
+  if [ "$total" -gt 0 ] && [ "$remaining" -ge "$total" ]; then
+    out "○ $t" "$phase ready — left-click to start" ""
+  else
+    out "○ $t" "$phase paused with $t left — left-click to resume" ""
+  fi
 elif [ "$phase" = "focus" ]; then
   out "● $t" "Focus — $t left. Left-click pauses, right-click skips to break" ""
 else

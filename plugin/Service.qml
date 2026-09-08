@@ -9,9 +9,10 @@ Item {
 
   property var settings: ({})
 
-  // Must mirror cli/pomo FOCUS_LEN / BREAK_LEN.
-  readonly property int focusLen: 1500
-  readonly property int breakLen: 300
+  // Session lengths. Defaults mirror cli/pomo; the state file overrides them
+  // with the cli's current focus_len/break_len (custom durations update these).
+  property int focusLen: 1500
+  property int breakLen: 300
 
   // Raw state from the file.
   property string phase: "idle" // idle | focus | break
@@ -30,6 +31,8 @@ Item {
 
   readonly property bool expired: (runStatus === "done") || (runStatus === "running" && phase !== "idle" && endsAt > 0 && nowSec >= endsAt)
   readonly property bool live: runStatus === "running" && !expired
+  // Ready state: next phase armed at full length, waiting for play.
+  readonly property bool ready: !live && effTotal > 0 && remaining >= effTotal
   readonly property real progress: effTotal > 0 ? Math.max(0, Math.min(1, 1 - remaining / effTotal)) : 0
 
   readonly property string statePath: (Quickshell.env("XDG_STATE_HOME")
@@ -121,6 +124,8 @@ Item {
     endsAt = d.ends_at || 0
     storedRemaining = d.remaining || 0
     total = d.total || 0
+    if (d.focus_len > 0) focusLen = d.focus_len
+    if (d.break_len > 0) breakLen = d.break_len
     autoStart = d.auto === true
     tick()
   }
@@ -131,6 +136,8 @@ Item {
     endsAt = 0
     storedRemaining = 0
     total = 0
+    focusLen = 1500
+    breakLen = 300
     autoStart = false
     tick()
   }

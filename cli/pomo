@@ -25,6 +25,7 @@ play_sound() {
 mkdir -p "$STATE_DIR"
 LOG_FILE="$STATE_DIR/pomo.log"
 DEADLINE_FILE="$STATE_DIR/deadlines.tsv"
+DEADLINE_SEQ="$STATE_DIR/deadlines.seq"
 TAB=$'\t'
 
 # Runtime durations (secs). Loaded from state so a custom length chosen via
@@ -54,7 +55,7 @@ get() { # $1=key $2=default
     phase|status)
       v=$(sed -n "s/.*\"$key\":\"\([^\"]*\)\".*/\1/p" "$STATE_FILE" 2>/dev/null | head -1 || true)
       ;;
-    auto)
+    auto|countup)
       v=$(sed -n "s/.*\"$key\":\([a-z]*\).*/\1/p" "$STATE_FILE" 2>/dev/null | head -1 || true)
       ;;
     *)
@@ -64,10 +65,10 @@ get() { # $1=key $2=default
   echo "${v:-$def}"
 }
 
-save() { # $1=phase $2=status $3=ends_at $4=remaining [$5=auto, keeps current when empty]
-  local auto="${5:-$(get auto "false")}"
-  printf '{"phase":"%s","status":"%s","ends_at":%d,"remaining":%d,"auto":%s,"focus_len":%d,"break_len":%d,"total":%d}\n' \
-    "$1" "$2" "$3" "$4" "$auto" "$FOCUS_LEN" "$BREAK_LEN" "$TOTAL" > "$STATE_FILE"
+save() { # $1=phase $2=status $3=ends_at $4=remaining [$5=auto, $6=countup; keep current when empty]
+  local auto="${5:-$(get auto "false")}" countup="${6:-$(get countup "false")}"
+  printf '{"phase":"%s","status":"%s","ends_at":%d,"remaining":%d,"auto":%s,"countup":%s,"focus_len":%d,"break_len":%d,"total":%d}\n' \
+    "$1" "$2" "$3" "$4" "$auto" "$countup" "$FOCUS_LEN" "$BREAK_LEN" "$TOTAL" > "$STATE_FILE"
 }
 
 ensure_state() {
@@ -76,13 +77,20 @@ ensure_state() {
   fi
 }
 
-live_remaining() { # echoes remaining secs (clamped >=0)
-  local status ends_at remaining n
+live_remaining() { # echoes remaining secs (clamped >=0); in count-up mode, elapsed secs
+  local status ends_at remaining n countup
   status=$(get status "idle")
   ends_at=$(get ends_at "0")
   remaining=$(get remaining "0")
+  countup=$(get countup "false")
   n=$(now)
-  if [ "$status" = "done" ]; then
+  if [ "$countup" = "true" ]; then
+    if [ "$status" = "running" ]; then
+      echo $(( n - ends_at > 0 ? n - ends_at : 0 ))
+    else
+      echo "$remaining"
+    fi
+  elif [ "$status" = "done" ]; then
     echo 0
   elif [ "$status" = "running" ]; then
     echo $(( ends_at - n > 0 ? ends_at - n : 0 ))
@@ -92,26 +100,41 @@ live_remaining() { # echoes remaining secs (clamped >=0)
 }
 
 is_expired_running() { # true (0) when a running phase has hit zero but not yet completed
-  local status phase ends_at n
+  local status phase ends_at n countup
   status=$(get status "idle")
   phase=$(get phase "idle")
   ends_at=$(get ends_at "0")
+  countup=$(get countup "false")
   n=$(now)
+  # A count-up session has no end, so it can never expire.
+  [ "$countup" = "true" ] && return 1
   [ "$status" = "running" ] && [ "$phase" != "idle" ] && [ "$n" -ge "$ends_at" ]
 }
 
-cmd_start() { # [focus|break] [minutes], default focus + stored length
-  local phase="${1:-focus}" mins="${2:-}" n len
+cmd_start() { # [focus|break] [minutes|up], default focus + stored length
+  local phase="${1:-focus}" mins="${2:-}" n len countup="false"
   case "$phase" in
     focus|break) ;;
-    *) echo "usage: pomo start [focus|break] [minutes]" >&2; exit 1 ;;
+    up) phase="focus"; countup="true" ;;
+    *) echo "usage: pomo start [focus|break|up] [minutes|up]" >&2; exit 1 ;;
   esac
-  if [ -n "$mins" ]; then
+  if [ "$mins" = "up" ]; then
+    # Open-ended focus: no target length, the session just counts up until
+    # skipped or reset. Breaks keep a fixed length (an open break has no use).
+    if [ "$phase" = "break" ]; then
+      echo "count-up only works for focus, not breaks" >&2
+      exit 1
+    fi
+    countup="true"
+    len=0
+  elif [ -n "$mins" ]; then
     case "$mins" in
-      ''|*[!0-9]*|0) echo "minutes must be a positive number" >&2; exit 1 ;;
+      ''|*[!0-9]*|0) echo "minutes must be a positive number or \"up\"" >&2; exit 1 ;;
     esac
     len=$(( mins * 60 ))
     if [ "$phase" = "focus" ]; then FOCUS_LEN=$len; else BREAK_LEN=$len; fi
+  elif [ "$countup" = "true" ]; then
+    len=0
   elif [ "$phase" = "focus" ]; then
     len=$FOCUS_LEN
   else
@@ -119,11 +142,15 @@ cmd_start() { # [focus|break] [minutes], default focus + stored length
   fi
   TOTAL=$len
   n=$(now)
-  if [ "$phase" = "focus" ]; then
-    save "focus" "running" $(( n + len )) "$len"
+  if [ "$countup" = "true" ]; then
+    # ends_at carries the session START; elapsed = now - ends_at.
+    save "focus" "running" "$n" 0 "" "$countup"
+    report "focus started · counting up"
+  elif [ "$phase" = "focus" ]; then
+    save "focus" "running" $(( n + len )) "$len" "" "$countup"
     report "focus started · $(fmt "$len")"
   else
-    save "break" "running" $(( n + len )) "$len"
+    save "break" "running" $(( n + len )) "$len" "" "$countup"
     report "break started · $(fmt "$len")"
   fi
 }
@@ -149,9 +176,14 @@ cmd_pause() {
   phase=$(get phase "focus")
   ends_at=$(get ends_at "0")
   n=$(now)
-  remaining=$(( ends_at - n > 0 ? ends_at - n : 0 ))
+  if [ "$(get countup "false")" = "true" ]; then
+    # Count-up: freeze the elapsed time in "remaining".
+    remaining=$(( n - ends_at > 0 ? n - ends_at : 0 ))
+  else
+    remaining=$(( ends_at - n > 0 ? ends_at - n : 0 ))
+  fi
   save "$phase" "paused" "$ends_at" "$remaining"
-  report "$phase paused · $(fmt "$remaining") left"
+  report "$phase paused · $(fmt "$remaining")"
 }
 
 cmd_resume() {
@@ -178,8 +210,14 @@ cmd_resume() {
   fi
   phase=$(get phase "focus")
   n=$(now)
-  save "$phase" "running" $(( n + remaining )) "$remaining"
-  report "$phase resumed · $(fmt "$remaining") left"
+  if [ "$(get countup "false")" = "true" ]; then
+    # Count-up: rewind ends_at so now - ends_at keeps counting from the pause point.
+    save "$phase" "running" $(( n - remaining )) "$remaining"
+    report "$phase resumed · $(fmt "$remaining") elapsed"
+  else
+    save "$phase" "running" $(( n + remaining )) "$remaining"
+    report "$phase resumed · $(fmt "$remaining") left"
+  fi
 }
 
 cmd_toggle() {
@@ -222,7 +260,7 @@ cmd_toggle() {
 
 cmd_reset() {
   TOTAL=0
-  save "idle" "idle" 0 0
+  save "idle" "idle" 0 0 "" "false"
   report "reset to idle"
 }
 
@@ -245,6 +283,15 @@ cmd_skip() {
       return
     fi
   fi
+  if [ "$(get countup "false")" = "true" ] && [ "$(get status "idle")" != "idle" ]; then
+    # Leaving a count-up focus (only skip/reset can end it — it never expires):
+    # log the elapsed time as a completed session so `pomo stats` counts it.
+    local elapsed
+    elapsed=$(live_remaining)
+    TOTAL=$elapsed
+    report "focus completed · $(fmt "$elapsed") · count-up"
+    notify-send "Pomodoro" "Count-up focus done · $(fmt "$elapsed")" 2>/dev/null || true
+  fi
   case "$(get phase "idle")" in
     focus) cmd_start "break" ;;
     break) cmd_start "focus" ;;
@@ -262,11 +309,13 @@ cmd_status() {
   n=$(now)
   if [ "$status" = "done" ]; then
     expired="true"
+  elif [ "$(get countup "false")" = "true" ]; then
+    expired="false"
   elif [ "$status" = "running" ] && [ "$n" -ge "$ends_at" ] && [ "$phase" != "idle" ]; then
     expired="true"
   fi
-  printf '{"phase":"%s","status":"%s","ends_at":%d,"remaining":%d,"expired":%s,"auto":%s,"total":%d}\n' \
-    "$phase" "$status" "$ends_at" "$remaining" "$expired" "$(get auto "false")" "$(get total "0")"
+  printf '{"phase":"%s","status":"%s","ends_at":%d,"remaining":%d,"expired":%s,"auto":%s,"countup":%s,"total":%d}\n' \
+    "$phase" "$status" "$ends_at" "$remaining" "$expired" "$(get auto "false")" "$(get countup "false")" "$(get total "0")"
 }
 
 count_from() { # $1=start-date (YYYY-MM-DD) -> focus sessions completed since then
@@ -347,6 +396,10 @@ cmd_expired() {
   status=$(get status "idle")
   ends_at=$(get ends_at "0")
   n=$(now)
+  # Count-up sessions never expire (ends_at holds their start, not a deadline).
+  if [ "$(get countup "false")" = "true" ]; then
+    exit 0
+  fi
   if [ "$status" = "done" ]; then
     exit 0
   fi
@@ -379,7 +432,15 @@ cmd_expired() {
   fi
 }
 
-# --- deadlines (manual entry; "id<TAB>epoch<TAB>title" per line, no jq) ---
+# --- deadlines (manual entry; TSV, no jq) ---
+# One deadline per line:
+#   id<TAB>due<TAB>title<TAB>status<TAB>done_at<TAB>grade
+# status is open | done | hidden; done_at is an epoch (0 while open); grade is
+# free text ("7.5", "A-", "82/100") and may be empty. Lines written before the
+# status column existed have three fields and read as open. Every field but
+# the last is always non-empty, which is what lets bash `read` split on tabs
+# (consecutive tabs collapse when IFS is whitespace).
+#
 # Deadlines are typed by hand on purpose: university feeds are unreliable or
 # missing, and the deadlines that matter most (read ch.7, draft by Sunday) never
 # live in one anyway. Entry has to be forgiving, so `date -d` does the parsing.
@@ -394,6 +455,14 @@ parse_when() { # $1=free date text -> epoch
     [0-9]*[hH]) norm="${norm%[hH]} hours" ;;
     [0-9]*[dD]) norm="${norm%[dD]} days" ;;
     [0-9]*[wW]) norm="${norm%[wW]} weeks" ;;
+  esac
+  # GNU date reads today/tomorrow/yesterday as now +/- 24h, so the clock time
+  # rides along and the end-of-day snap below never sees them ("tomorrow" landed
+  # at whatever o'clock you typed it). Pin them to their date first. Periods
+  # ("next week") and offsets ("3 days", "in 3 hours") keep the clock time on
+  # purpose -- they name a distance, not a day.
+  case "${norm,,}" in
+    today|tomorrow|yesterday) norm="$(date -d "${norm,,}" +%F) 00:00" ;;
   esac
   ts=$(date -d "$norm" +%s 2>/dev/null) || return 1
   # A bare day ("friday", "tomorrow", "2026-09-12") parses to 00:00, which as a
@@ -421,13 +490,74 @@ rel() { # $1=epoch -> "in 4d" / "in 3h" / "5m late"
   if [ "$d" -lt 0 ]; then echo "$unit late"; else echo "in $unit"; fi
 }
 
-next_id() {
-  [ -s "$DEADLINE_FILE" ] || { echo 1; return; }
-  awk -F'\t' '$1+0 > m { m = $1+0 } END { print m + 1 }' m=0 "$DEADLINE_FILE"
+next_id() { # never returns the same id twice, even across removals
+  # An id is a reference: a log line that says "--for 7" has to still mean
+  # deadline 7 after 7 is gone. max(id in file)+1 recycles the top id on every
+  # removal, so the high-water mark lives in its own file instead.
+  local seq=0 top
+  if [ -s "$DEADLINE_SEQ" ]; then
+    seq=$(tr -cd '0-9' < "$DEADLINE_SEQ" || true)
+  fi
+  seq=${seq:-0}
+  # Self-healing: a missing or truncated seq file (fresh install, hand-cleaned
+  # state dir, a store that predates this) falls back to the highest id on file
+  # so we never hand out one that is already taken.
+  if [ -s "$DEADLINE_FILE" ]; then
+    top=$(awk -F'\t' '$1+0 > m { m = $1+0 } END { print m+0 }' m=0 "$DEADLINE_FILE")
+    if [ "${top:-0}" -gt "$seq" ]; then seq=$top; fi
+  fi
+  seq=$(( seq + 1 ))
+  printf '%d\n' "$seq" > "$DEADLINE_SEQ"
+  echo "$seq"
 }
 
+# Every reader goes through this so a three-column line from an older store
+# comes out with the same six fields as a fresh one.
+normalize_deadlines() { # stdin -> stdout, six tab-separated fields per line
+  awk -F'\t' 'BEGIN { OFS = "\t" }
+    NF >= 3 {
+      s = $4; if (s != "open" && s != "done" && s != "hidden") s = "open"
+      print $1, $2, $3, s, $5+0, $6
+    }'
+}
+
+find_deadline() { # $1=id -> the normalized line, or empty
+  [ -s "$DEADLINE_FILE" ] || return 0
+  awk -F'\t' -v id="$1" '$1+0 == id+0 { print; exit }' "$DEADLINE_FILE" | normalize_deadlines
+}
+
+# Listing order: open by due date, then done by due date, then hidden. That is
+# the order a student wants to scan, and the widget mirrors it.
 sorted_deadlines() {
-  sort -t"$TAB" -k2,2n "$DEADLINE_FILE"
+  normalize_deadlines < "$DEADLINE_FILE" \
+    | awk -F'\t' 'BEGIN { OFS = "\t"; r["open"] = 0; r["done"] = 1; r["hidden"] = 2 } { print r[$4], $0 }' \
+    | sort -t"$TAB" -k1,1n -k3,3n \
+    | cut -f2-
+}
+
+write_deadline() { # $1=id $2=due $3=title $4=status $5=done_at $6=grade -> rewrite that line in place
+  local tmp
+  tmp=$(mktemp "$DEADLINE_FILE.XXXXXX")
+  # Title and grade go through the environment, not -v: awk expands backslash
+  # escapes in a -v value and would eat them out of the text.
+  t="$3" g="$6" awk -F'\t' -v id="$1" -v ts="$2" -v st="$4" -v da="$5" '
+    BEGIN { OFS = "\t" }
+    $1+0 == id+0 { print $1, ts, ENVIRON["t"], st, da, ENVIRON["g"]; next }
+    { print }' "$DEADLINE_FILE" > "$tmp"
+  mv "$tmp" "$DEADLINE_FILE"
+}
+
+require_deadline() { # $1=id -> sets ID TS TITLE STATUS DONE_AT GRADE or exits
+  case "$1" in
+    ''|*[!0-9]*) echo "usage: pomo deadline $2 <id>" >&2; exit 1 ;;
+  esac
+  local line
+  line=$(find_deadline "$1")
+  if [ -z "$line" ]; then
+    echo "pomo: no deadline #$1" >&2
+    exit 1
+  fi
+  IFS="$TAB" read -r ID TS TITLE STATUS DONE_AT GRADE <<< "$line"
 }
 
 cmd_deadline_add() { # <title> <when...>
@@ -445,70 +575,202 @@ cmd_deadline_add() { # <title> <when...>
   fi
   title=${title//"$TAB"/ }
   id=$(next_id)
-  printf '%d\t%d\t%s\n' "$id" "$ts" "$title" >> "$DEADLINE_FILE"
+  printf '%d\t%d\t%s\topen\t0\t\n' "$id" "$ts" "$title" >> "$DEADLINE_FILE"
   report "deadline #$id · $(when_text "$ts") · $title"
 }
 
-cmd_deadline_list() { # [--json]
+cmd_deadline_set() { # <id> [--title <text>] [<when...>]
+  # Editing in place instead of rm+add is the point: sessions will attach to a
+  # deadline id (student-os.md D7), so a retimed deadline has to keep its
+  # identity or it orphans its own history.
+  local id="${1:-}" title="" when="" ts
+  shift 2>/dev/null || true
+  case "$id" in
+    ''|*[!0-9]*) echo 'usage: pomo deadline set <id> [--title <text>] [<when...>]' >&2; exit 1 ;;
+  esac
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --title) shift; title="${1:-}" ;;
+      # Bare words are the new date, so `set 1 friday 17:00` reads the way you
+      # would say it. --when is accepted for symmetry and needs no handling.
+      --when)  ;;
+      *)       when="${when:+$when }$1" ;;
+    esac
+    shift
+  done
+  if [ -z "$title" ] && [ -z "$when" ]; then
+    echo 'usage: pomo deadline set <id> [--title <text>] [<when...>]' >&2
+    echo '  e.g. pomo deadline set 1 friday 17:00' >&2
+    exit 1
+  fi
+  require_deadline "$id" set
+  if [ -n "$when" ]; then
+    if ! ts=$(parse_when "$when"); then
+      echo "pomo: can't read a date out of \"$when\"" >&2
+      exit 1
+    fi
+  else
+    ts="$TS"
+  fi
+  [ -n "$title" ] || title="$TITLE"
+  title=${title//"$TAB"/ }
+  write_deadline "$ID" "$ts" "$title" "$STATUS" "$DONE_AT" "$GRADE"
+  report "deadline #$ID · $(when_text "$ts") · $title"
+}
+
+cmd_deadline_done() { # <id> -> submitted: drops out of the countdown, stays on the list
+  require_deadline "${1:-}" done
+  if [ "$STATUS" = "done" ]; then
+    echo "deadline #$ID already done"
+    return
+  fi
+  write_deadline "$ID" "$TS" "$TITLE" "done" "$(now)" "$GRADE"
+  report "deadline #$ID done · $TITLE"
+}
+
+cmd_deadline_reopen() { # <id> -> back to open (also unhides)
+  require_deadline "${1:-}" reopen
+  if [ "$STATUS" = "open" ]; then
+    echo "deadline #$ID already open"
+    return
+  fi
+  write_deadline "$ID" "$TS" "$TITLE" "open" 0 "$GRADE"
+  report "deadline #$ID reopened · $TITLE"
+}
+
+cmd_deadline_grade() { # <id> [<grade...>] -> record the mark; no grade clears it
+  local id="${1:-}" grade status done_at
+  shift 2>/dev/null || true
+  grade="$*"
+  case "$id" in
+    ''|*[!0-9]*)
+      echo 'usage: pomo deadline grade <id> [<grade>]' >&2
+      echo '  e.g. pomo deadline grade 3 7.5      (no grade clears it)' >&2
+      exit 1 ;;
+  esac
+  require_deadline "$id" grade
+  grade=${grade//"$TAB"/ }
+  status="$STATUS"
+  done_at="$DONE_AT"
+  # A graded deadline has been handed in, so grading an open one marks it done
+  # in the same stroke. A hidden one stays hidden.
+  if [ -n "$grade" ] && [ "$status" = "open" ]; then
+    status="done"
+    done_at=$(now)
+  fi
+  write_deadline "$ID" "$TS" "$TITLE" "$status" "$done_at" "$grade"
+  if [ -n "$grade" ]; then
+    report "deadline #$ID graded $grade · $TITLE"
+  else
+    report "deadline #$ID grade cleared · $TITLE"
+  fi
+}
+
+cmd_deadline_hide() { # <id> -> keep the record (agents still see it), drop it from the list and popup
+  require_deadline "${1:-}" hide
+  if [ "$STATUS" = "hidden" ]; then
+    echo "deadline #$ID already hidden"
+    return
+  fi
+  # Hiding something never handed in would lose the fact that it was missed,
+  # so an open deadline is closed out first.
+  [ "$DONE_AT" -gt 0 ] || DONE_AT=$(now)
+  write_deadline "$ID" "$TS" "$TITLE" "hidden" "$DONE_AT" "$GRADE"
+  report "deadline #$ID hidden · $TITLE"
+}
+
+cmd_deadline_unhide() { # <id> -> back on the list as done
+  require_deadline "${1:-}" unhide
+  if [ "$STATUS" != "hidden" ]; then
+    echo "deadline #$ID is not hidden"
+    return
+  fi
+  write_deadline "$ID" "$TS" "$TITLE" "done" "$DONE_AT" "$GRADE"
+  report "deadline #$ID unhidden · $TITLE"
+}
+
+deadline_json() { # stdin (normalized, sorted lines) -> JSON array
+  awk -F'\t' '
+    function q(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); gsub(/\t/, " ", s); return "\"" s "\"" }
+    BEGIN { printf "[" }
+    {
+      printf "%s{\"id\":%d,\"due\":%d,\"title\":%s,\"status\":\"%s\",\"done_at\":%s,\"grade\":%s}", \
+        (NR > 1 ? "," : ""), $1, $2, q($3), $4, ($5+0 > 0 ? $5+0 : "null"), ($6 == "" ? "null" : q($6))
+    }
+    END { printf "]" }'
+}
+
+cmd_deadline_list() { # [--all] [--json]; hidden deadlines only show with --all
+  local all="false" json="false" a
+  for a in "$@"; do
+    case "$a" in
+      --all)  all="true" ;;
+      --json) json="true" ;;
+      '') ;;
+      *) echo 'usage: pomo deadline list [--all] [--json]' >&2; exit 1 ;;
+    esac
+  done
   if [ ! -s "$DEADLINE_FILE" ]; then
-    if [ "${1:-}" = "--json" ]; then
+    if [ "$json" = "true" ]; then
       echo '{"deadlines":[]}'
     else
       echo 'no deadlines — pomo deadline add "Essay draft" friday'
     fi
     return
   fi
-  if [ "${1:-}" = "--json" ]; then
-    sorted_deadlines | awk -F'\t' '
-      BEGIN { printf "{\"deadlines\":[" }
-      {
-        t = $3
-        gsub(/\\/, "\\\\", t)
-        gsub(/"/, "\\\"", t)
-        printf "%s{\"id\":%d,\"due\":%d,\"title\":\"%s\"}", (NR > 1 ? "," : ""), $1, $2, t
-      }
-      END { print "]}" }'
+  if [ "$json" = "true" ]; then
+    printf '{"deadlines":'
+    sorted_deadlines | awk -F'\t' -v all="$all" 'all == "true" || $4 != "hidden"' | deadline_json
+    echo '}'
     return
   fi
-  local id ts title
-  sorted_deadlines | while IFS="$TAB" read -r id ts title; do
-    printf '%3s  %-17s %-9s %s\n' "$id" "$(when_text "$ts")" "$(rel "$ts")" "$title"
-  done
-}
-
-cmd_deadline_rm() { # <id>
-  local id="${1:-}" tmp
-  case "$id" in
-    ''|*[!0-9]*) echo "usage: pomo deadline rm <id>" >&2; exit 1 ;;
-  esac
-  if [ ! -s "$DEADLINE_FILE" ] || ! awk -F'\t' -v id="$id" '$1+0 == id+0 { f = 1 } END { exit !f }' "$DEADLINE_FILE"; then
-    echo "pomo: no deadline #$id" >&2
-    exit 1
+  local id ts title status done_at grade mark shown=0
+  while IFS="$TAB" read -r id ts title status done_at grade; do
+    [ "$status" = "hidden" ] && [ "$all" != "true" ] && continue
+    shown=$(( shown + 1 ))
+    case "$status" in
+      done)   mark="✓" ;;
+      hidden) mark="·" ;;
+      *)      mark=" " ;;
+    esac
+    printf '%3s %s %-17s %-9s %s%s\n' "$id" "$mark" "$(when_text "$ts")" \
+      "$([ "$status" = "open" ] && rel "$ts" || echo "$status")" "$title" "${grade:+  [$grade]}"
+  done < <(sorted_deadlines)
+  if [ "$shown" -eq 0 ]; then
+    echo 'nothing open — pomo deadline list --all shows hidden ones'
   fi
-  tmp=$(mktemp "$DEADLINE_FILE.XXXXXX")
-  awk -F'\t' -v id="$id" '$1+0 != id+0' "$DEADLINE_FILE" > "$tmp"
-  mv "$tmp" "$DEADLINE_FILE"
-  report "deadline #$id removed"
 }
 
-cmd_deadline_next() { # [--json] -> soonest upcoming, else least-late overdue
-  local line id ts title
+cmd_deadline_rm() { # <id> -> delete outright (hide keeps the record instead)
+  local tmp
+  require_deadline "${1:-}" rm
+  tmp=$(mktemp "$DEADLINE_FILE.XXXXXX")
+  awk -F'\t' -v id="$ID" '$1+0 != id+0' "$DEADLINE_FILE" > "$tmp"
+  mv "$tmp" "$DEADLINE_FILE"
+  report "deadline #$ID removed · $TITLE"
+}
+
+cmd_deadline_next() { # [--json] -> soonest open deadline still ahead, else least-late open one
+  local line id ts title status done_at grade
   if [ -s "$DEADLINE_FILE" ]; then
-    # First upcoming wins; when everything has passed, fall back to the last
-    # (least late) one. The bar widget picks the same way.
+    # Only open deadlines count: done ones are off the clock. First upcoming
+    # wins; when everything has passed, fall back to the last (least late) one.
+    # The bar widget picks the same way.
     line=$(sorted_deadlines | awk -F'\t' -v n="$(now)" '
+      $4 != "open" { next }
       $2+0 >= n { print; found = 1; exit }
       { last = $0 }
       END { if (!found && last != "") print last }')
   fi
   if [ -z "${line:-}" ]; then
-    [ "${1:-}" = "--json" ] && echo '{"next":null}' || echo "no deadlines"
+    [ "${1:-}" = "--json" ] && echo '{"next":null}' || echo "no open deadlines"
     return
   fi
-  IFS="$TAB" read -r id ts title <<< "$line"
+  IFS="$TAB" read -r id ts title status done_at grade <<< "$line"
   if [ "${1:-}" = "--json" ]; then
-    printf '{"next":{"id":%d,"due":%d,"title":"%s"}}\n' "$id" "$ts" \
-      "$(printf '%s' "$title" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+    printf '{"next":'
+    printf '%s\n' "$line" | deadline_json | sed 's/^\[//; s/\]$//'
+    echo '}'
   else
     printf '#%s  %s  %s  %s\n' "$id" "$(when_text "$ts")" "$(rel "$ts")" "$title"
   fi
@@ -518,18 +780,59 @@ cmd_deadline() {
   local sub="${1:-list}"
   shift 2>/dev/null || true
   case "$sub" in
-    add)      cmd_deadline_add "$@" ;;
-    list|ls)  cmd_deadline_list "${1:-}" ;;
-    rm|remove) cmd_deadline_rm "${1:-}" ;;
-    next)     cmd_deadline_next "${1:-}" ;;
-    --json)   cmd_deadline_list --json ;;
-    *) echo "usage: pomo deadline [add <title> <when...> | list [--json] | rm <id> | next [--json]]" >&2; exit 1 ;;
+    add)          cmd_deadline_add "$@" ;;
+    set|edit)     cmd_deadline_set "$@" ;;
+    list|ls)      cmd_deadline_list "$@" ;;
+    done|submit)  cmd_deadline_done "${1:-}" ;;
+    undone|reopen) cmd_deadline_reopen "${1:-}" ;;
+    grade)        cmd_deadline_grade "$@" ;;
+    hide)         cmd_deadline_hide "${1:-}" ;;
+    unhide|show)  cmd_deadline_unhide "${1:-}" ;;
+    rm|remove)    cmd_deadline_rm "${1:-}" ;;
+    next)         cmd_deadline_next "${1:-}" ;;
+    --json|--all) cmd_deadline_list "$sub" "$@" ;;
+    help|-h|--help) deadline_usage 2>&1 ;;
+    *) deadline_usage; exit 1 ;;
   esac
 }
 
+deadline_usage() {
+  cat >&2 <<'USAGE'
+usage: pomo deadline add <title> <when...>      # "Essay draft" next friday 17:00
+       pomo deadline set <id> [--title <text>] [<when...>]
+       pomo deadline list [--all] [--json]      # --all includes hidden
+       pomo deadline done|reopen <id>           # submitted / back to open
+       pomo deadline grade <id> [<grade>]       # record the mark (marks done); no grade clears it
+       pomo deadline hide|unhide <id>           # keep the record, drop it from the list
+       pomo deadline rm <id>                    # delete outright
+       pomo deadline next [--json]              # the one the bar counts down to
+USAGE
+}
+
+cmd_report() { # --json -> everything an agent needs in one call
+  # Plain files plus one command, no daemon (student-os.md principle 1). Hidden
+  # deadlines are included: they are the graded history, which is the part an
+  # agent learns the most from.
+  if [ "${1:-}" != "--json" ]; then
+    echo 'usage: pomo report --json' >&2
+    exit 1
+  fi
+  printf '{"generated_at":%d,"timer":' "$(now)"
+  cmd_status | tr -d '\n'
+  printf ',"stats":'
+  cmd_stats --json | tr -d '\n'
+  printf ',"deadlines":'
+  if [ -s "$DEADLINE_FILE" ]; then
+    sorted_deadlines | deadline_json
+  else
+    printf '[]'
+  fi
+  printf ',"files":{"state":"%s","log":"%s","deadlines":"%s"}}\n' "$STATE_FILE" "$LOG_FILE" "$DEADLINE_FILE"
+}
+
 usage() {
-  echo "usage: pomo start [focus|break] [minutes] | pause | resume | toggle | reset | skip | status | stats [day|week|month|--json] | bell | autostart [on|off|toggle] | expired" >&2
-  echo "       pomo deadline [add <title> <when...> | list [--json] | rm <id> | next [--json]]" >&2
+  echo "usage: pomo start [focus|break] [minutes|up] | pause | resume | toggle | reset | skip | status | stats [day|week|month|--json] | bell | autostart [on|off|toggle] | expired | report --json" >&2
+  echo "       pomo deadline add|set|list|done|reopen|grade|hide|unhide|rm|next  (pomo deadline help)" >&2
 }
 
 ensure_state
@@ -545,6 +848,7 @@ case "${1:-}" in
   bell)   cmd_bell ;;
   autostart) shift; cmd_autostart "${1:-status}" ;;
   expired) cmd_expired ;;
+  report) shift; cmd_report "${1:-}" ;;
   deadline|deadlines) shift; cmd_deadline "$@" ;;
   -h|--help|help|"") usage; exit 1 ;;
   *) echo "unknown command: $1" >&2; usage; exit 1 ;;

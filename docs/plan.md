@@ -26,6 +26,25 @@
       bar widget (`plugin-deadline/`): calendar glyph + countdown to the next
       deadline, urgent-coloured inside 24h, popup lists the next 6 with `x` to
       remove. Installed alongside `student.pomo` in the bar's center section.
+- [x] Step 13a — deadline identity: ids are handed out once and never reused
+      (high-water mark in `deadlines.seq`, self-healing from the store when the
+      file is missing), and `pomo deadline set <id> [--title <text>] [<when...>]`
+      edits in place. Also fixed `parse_when`: GNU date reads today/tomorrow/
+      yesterday as now +/- 24h, so those never hit the end-of-day snap and
+      "tomorrow" landed at whatever o'clock you typed it.
+- [x] Step 13b — closing deadlines out. Store grows three columns
+      (`status<TAB>done_at<TAB>grade`; old three-column lines read as open).
+      CLI: `pomo deadline done|reopen|grade|hide|unhide <id>`, `list --all`,
+      and `pomo report --json` (timer + stats + every deadline incl. hidden,
+      the one call an agent needs). Grading an open deadline marks it done;
+      hiding keeps the record for the agent but drops it from list and popup;
+      `rm` still deletes. Bar counts down to the next *open* deadline only
+      (`✓` when everything is handed in). Popup is a keyboard grid: rows are
+      deadlines, columns are the row itself (Enter = done/undo), grade (inline
+      editor), hide, remove; `d` `g` `x` shortcuts; done rows strike through
+      and sink to the bottom. `SUPER+ALT+D` summons it. Gotcha: the shell's
+      plugin hot-reload keeps the old compiled component, so after copying
+      QML into `~/.config/omarchy/plugins/` run `omarchy restart shell`.
 - [ ] Later — deadline entry from the popup, `.ics` import for whoever *does*
       have a working feed, analytics (`history`), daily counter
 
@@ -41,9 +60,12 @@ Hypr bindings (active):
 o.bind("SUPER + ALT + P", "Pomo toggle", "pomo toggle")
 o.bind("SUPER + ALT + N", "Pomo skip", "pomo skip")
 o.bind("SUPER + ALT + O", "Pomo popup", "omarchy-shell student.pomo toggle")
+o.bind("SUPER + ALT + D", "Deadlines popup", "omarchy-shell student.deadline toggle")
 ```
 
 ## Decisions
+Longer-form design thinking lives in `docs/student-os.md` (agentic-first, cadence, progress, research).
+
 - 2026-09-05: Hybrid, name omarchy-student-pomodoro, v0.1 = keyboard shortcuts
 - 2026-09-07: Deadlines are manual-first and stay that way. Import was weighed
   and rejected for now: over years of study the feeds were "nothing but chaotic",
@@ -52,4 +74,12 @@ o.bind("SUPER + ALT + O", "Pomo popup", "omarchy-shell student.pomo toggle")
   store is deliberately shaped for a later read-only ICS sync — imported items
   would land in a separate file, keyed by UID, never written back, so "sync" is
   refetch-and-replace with no merge logic.
+- 2026-09-09: Deadline ids are stable references, not row numbers. Sessions
+  will attach to a deadline id (student-os.md D7), so a recycled id would make
+  old log lines silently point at a different deadline, and rm+add to fix a
+  wrong time would orphan a deadline's own history — hence `set`. Plain
+  integers are enough because there is one writer: sync is parked and ICS
+  import is read-only into a separate file keyed by UID, so the two namespaces
+  stay distinguishable on sight (integer = manual, UID = imported). Revisit
+  only if a second writer ever appears.
 - 2026-09-05: Calendar parked — direct Google/Outlook sync needs two OAuth flows, too heavy. When revisited, start with local `.ics` export (importable anywhere), not live sync. Next: daily counter.

@@ -2,28 +2,31 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 
-// Live deadline list. Watches the CLI's deadlines.tsv (one "id<TAB>epoch<TAB>title"
-// per line) and recomputes countdowns locally every second — same no-polling
-// shape as the pomodoro Service.
+// Live deadline list. Watches the CLI's deadlines.tsv (one
+// "id<TAB>epoch<TAB>title<TAB>status<TAB>done_at<TAB>grade" per line) and
+// recomputes countdowns locally every second — same no-polling shape as the
+// pomodoro Service. All writes go through the CLI so the file has one owner.
 Item {
   id: root
 
   property var settings: ({})
 
-  // Parsed file contents, sorted by due date (soonest first).
+  // Parsed file contents, hidden ones dropped, sorted open-first then by due.
   property var items: []
   property int nowSec: Math.floor(Date.now() / 1000)
 
   readonly property string filePath: (Quickshell.env("XDG_STATE_HOME")
     || Quickshell.env("HOME") + "/.local/state") + "/omarchy-student-pomodoro/deadlines.tsv"
 
-  // What the bar shows: the soonest deadline still ahead, or — when everything
-  // has already passed — the least-late one. Mirrors `pomo deadline next`.
+  // What the bar shows: the soonest *open* deadline still ahead, or — when
+  // every open one has already passed — the least-late one. Done deadlines
+  // are off the clock. Mirrors `pomo deadline next`.
   readonly property var nextItem: pickNext()
 
   function pickNext() {
     var last = null
     for (var i = 0; i < items.length; i++) {
+      if (items[i].status !== "open") continue
       if (items[i].due >= nowSec) return items[i]
       last = items[i]
     }
@@ -62,15 +65,22 @@ Item {
     return Qt.formatDateTime(new Date(due * 1000), "ddd d MMM HH:mm")
   }
 
+  function fmtDay(ts) { // "11 Sep"
+    return Qt.formatDateTime(new Date(ts * 1000), "d MMM")
+  }
+
   // Bar label: bare countdown, no "in" — the calendar glyph already says what
-  // it is, and bar space is the scarcest thing on screen.
+  // it is, and bar space is the scarcest thing on screen. A tick means the
+  // list is not empty but everything on it is handed in.
   readonly property string labelText: nextItem
-    ? " " + (isLate(nextItem.due) ? "late" : unit(nextItem.due - nowSec))
-    : " --"
+    ? " " + (isLate(nextItem.due) ? "late" : unit(nextItem.due - nowSec))
+    : (items.length > 0 ? " ✓" : " --")
 
   readonly property string tooltipText: nextItem
     ? nextItem.title + " — " + fmtWhen(nextItem.due) + " (" + fmtRel(nextItem.due) + ")"
-    : "No deadlines — pomo deadline add \"Essay draft\" friday"
+    : (items.length > 0
+      ? "All deadlines handed in"
+      : "No deadlines — pomo deadline add \"Essay draft\" friday")
 
   function tick() {
     nowSec = Math.floor(Date.now() / 1000)
@@ -85,11 +95,28 @@ Item {
       var id = parseInt(f[0], 10)
       var due = parseInt(f[1], 10)
       if (!isFinite(id) || !isFinite(due)) continue
-      // Titles can't contain tabs (the CLI strips them), so anything past the
-      // third field is a stray tab in a hand-edited file — rejoin it.
-      out.push({ id: id, due: due, title: f.slice(2).join(" ") })
+      // Columns past the sixth are ignored rather than folded into the
+      // title: the widget is installed as a *copy* of this file, so a newer
+      // CLI adding a column must not make a stale install render it as text.
+      var status = f.length > 3 ? f[3] : "open"
+      if (status !== "done" && status !== "hidden") status = "open"
+      if (status === "hidden") continue
+      var doneAt = f.length > 4 ? parseInt(f[4], 10) : 0
+      out.push({
+        id: id,
+        due: due,
+        title: f[2],
+        status: status,
+        doneAt: isFinite(doneAt) ? doneAt : 0,
+        grade: f.length > 5 ? f[5] : ""
+      })
     }
-    out.sort(function (a, b) { return a.due - b.due })
+    // Open ones first (they are what the list is for), then done ones fade
+    // out at the bottom. Same order as `pomo deadline list`.
+    out.sort(function (a, b) {
+      if (a.status !== b.status) return a.status === "open" ? -1 : 1
+      return a.due - b.due
+    })
     items = out
   }
 
@@ -97,11 +124,24 @@ Item {
     items = []
   }
 
-  // Fire-and-forget CLI action; the FileView picks up the result.
-  function remove(id) {
+  // Fire-and-forget CLI actions; the FileView picks up the result. One
+  // action at a time: the file is rewritten whole, so two in flight would
+  // race each other.
+  function run(args) {
     if (actionProc.running) return
-    actionProc.command = ["pomo", "deadline", "rm", String(id)]
+    actionProc.command = ["pomo", "deadline"].concat(args)
     actionProc.running = true
+  }
+
+  function remove(id) { run(["rm", String(id)]) }
+  function markDone(id) { run(["done", String(id)]) }
+  function reopen(id) { run(["reopen", String(id)]) }
+  function hide(id) { run(["hide", String(id)]) }
+  function grade(id, text) { run(["grade", String(id), String(text)]) }
+
+  function toggleDone(item) {
+    if (item.status === "open") markDone(item.id)
+    else reopen(item.id)
   }
 
   Timer {

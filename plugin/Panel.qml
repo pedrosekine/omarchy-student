@@ -112,8 +112,10 @@ Panel {
       else if (c === 2) svc.skip()
       else svc.reset()
     } else if (r === 1) {
-      if (svc.phase === "idle") svc.startFocus([15, 25, 45, 60][c])
-      else root.scopeIndex = c
+      if (svc.phase === "idle") {
+        if (c === 3) svc.startCountup()
+        else svc.startFocus([15, 25, 45][c])
+      } else root.scopeIndex = c
     } else if (r === 2) {
       if (svc.phase === "idle") root.scopeIndex = c
       else svc.autostartToggle()
@@ -139,10 +141,21 @@ Panel {
     return scopeIndex === 0 ? svc.dayCount : scopeIndex === 1 ? svc.weekCount : svc.monthCount
   }
 
+  function scopeSec() {
+    return scopeIndex === 0 ? svc.daySec : scopeIndex === 1 ? svc.weekSec : svc.monthSec
+  }
+
+  function focusedText() {
+    var s = scopeSec()
+    var h = Math.floor(s / 3600)
+    var m = Math.round((s % 3600) / 60)
+    if (m === 60) { h++; m = 0 }
+    return h > 0 ? h + "h " + (m < 10 ? "0" + m : m) + "m" : m + "m"
+  }
+
   function scopeText() {
     var n = scopeCount()
-    var sessions = n === 1 ? "1 session" : n + " sessions"
-    return sessions + (scopeIndex === 0 ? " today" : scopeIndex === 1 ? " this week" : " this month")
+    return (n === 1 ? "1 session" : n + " sessions") + "   ·   " + root.focusedText()
   }
 
   implicitWidth: button.implicitWidth
@@ -249,7 +262,7 @@ Panel {
             anchors.leftMargin: Style.space(6)
             anchors.verticalCenter: parent.verticalCenter
             textFormat: Text.PlainText
-            text: svc.fmt(svc.remaining)
+            text: (svc.countup && svc.runStatus !== "paused" ? "↑ " : "") + svc.fmt(svc.remaining)
             color: root.foreground
             font.family: root.fontFamily
             font.pixelSize: Style.font.display
@@ -293,14 +306,14 @@ Panel {
           spacing: Style.space(6)
 
           Repeater {
-            model: [15, 25, 45, 60]
+            model: ["15", "25", "45", "Up"]
 
             Button {
-              required property int modelData
+              required property string modelData
               required property int index
 
               Layout.fillWidth: true
-              text: modelData + " min"
+              text: modelData === "Up" ? "Count up" : modelData + " min"
               fontSize: Style.font.bodySmall
               foreground: root.foreground
               fontFamily: root.fontFamily
@@ -309,7 +322,7 @@ Panel {
               bordered: true
               hasCursor: root.cellHot(1, index)
               onHovered: function (h) { if (h) root.hoverCursor(1, index) }
-              onClicked: svc.startFocus(modelData)
+              onClicked: modelData === "Up" ? svc.startCountup() : svc.startFocus(modelData)
             }
           }
         }

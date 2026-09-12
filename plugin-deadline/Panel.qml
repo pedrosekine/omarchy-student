@@ -5,13 +5,22 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 
-// Deadline bar widget: countdown to the next deadline + upcoming list popup.
+// Deadline bar widget: countdown to the next open deadline + list popup.
 //
-// Deadlines are entered by hand through `pomo deadline add` — no feed to import
-// from, by design. This widget only reads and removes.
+// Deadlines are entered by hand through `pomo deadline add` — no feed to
+// import from, by design. The popup is where they get closed out: mark one
+// done when it is handed in, type the grade when it comes back, hide it once
+// it is history. Nothing here writes the store directly; every action is a
+// `pomo deadline ...` call and the file watcher paints the result.
 //
-// Left click toggles the list, right click removes nothing (deliberately: the
-// bar is a glance surface, destructive actions live in the popup behind `x`).
+// Keyboard model: a grid. Rows are deadlines, columns are
+//   0 the deadline itself   Enter = done / reopen
+//   1 grade                 Enter = inline grade editor
+//   2 hide                  Enter = keep the record, drop it from the list
+//   3 remove                Enter = delete outright
+// Up/Down pick a row, Left/Right a column, `d` `g` `x` are shortcuts for
+// done, grade, remove. Mouse hover drives the same cursor so exactly one
+// cell is highlighted at a time.
 Panel {
   id: root
   moduleName: "student.deadline"
@@ -19,6 +28,7 @@ Panel {
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color dim: Qt.darker(foreground, 1.55)
+  readonly property color faint: Qt.darker(foreground, 2.2)
   readonly property color urgent: bar ? bar.urgent : Color.urgent
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
@@ -28,18 +38,28 @@ Panel {
 
   // A popup that grows without bound stops being glanceable and starts
   // clipping against the panel's height cap. Show the front of the queue and
-  // count the rest.
-  readonly property int maxRows: 6
+  // count the rest. Done rows sort last, so they are the first to drop off.
+  readonly property int maxRows: 8
   readonly property var shown: svc.items.slice(0, maxRows)
   readonly property int hiddenCount: Math.max(0, svc.items.length - maxRows)
 
-  // Single-column keyboard cursor over the visible rows. Mouse hover drives
-  // the same state so exactly one row is highlighted at a time.
+  readonly property int cols: 4
+
   property bool cursorActive: false
   property int cursorRow: 0
+  property int cursorCol: 0
+
+  // Inline grade editor: the id being graded, 0 when closed. While open the
+  // key catcher is blocked so typing lands in the field.
+  property int gradingId: 0
+
+  function cellHot(row, col) {
+    return root.cursorActive && root.cursorRow === row && root.cursorCol === col
+  }
 
   function clampCursor() {
     root.cursorRow = Math.max(0, Math.min(root.shown.length - 1, root.cursorRow))
+    root.cursorCol = Math.max(0, Math.min(root.cols - 1, root.cursorCol))
   }
 
   function moveCursor(dx, dy) {
@@ -48,30 +68,78 @@ Panel {
       root.clampCursor()
       return
     }
+    if (dx !== 0) root.cursorCol += dx
     if (dy !== 0) root.cursorRow += dy
     root.clampCursor()
   }
 
-  function hoverCursor(row) {
+  function hoverCursor(row, col) {
     root.cursorActive = true
     root.cursorRow = row
+    root.cursorCol = col
+  }
+
+  function selectedItem() {
+    if (!root.cursorActive) return null
+    return root.shown[root.cursorRow] || null
+  }
+
+  function activateCursor() {
+    var item = root.selectedItem()
+    if (!item) return
+    if (root.cursorCol === 0) svc.toggleDone(item)
+    else if (root.cursorCol === 1) root.startGrade(item)
+    else if (root.cursorCol === 2) svc.hide(item.id)
+    else svc.remove(item.id)
+  }
+
+  function toggleSelected() {
+    var item = root.selectedItem()
+    if (item) svc.toggleDone(item)
+  }
+
+  function gradeSelected() {
+    var item = root.selectedItem()
+    if (item) root.startGrade(item)
   }
 
   function removeSelected() {
-    if (!root.cursorActive) return
-    var item = root.shown[root.cursorRow]
+    var item = root.selectedItem()
     if (item) svc.remove(item.id)
   }
 
-  function rowColor(due) {
-    return svc.isUrgent(due) ? root.urgent : svc.isNear(due) ? root.foreground : root.dim
+  function startGrade(item) {
+    root.hoverCursor(root.shown.indexOf(item), 1)
+    root.gradingId = item.id
+  }
+
+  function finishGrade(item, text) {
+    if (root.gradingId !== item.id) return
+    root.gradingId = 0
+    if (text !== item.grade) svc.grade(item.id, text)
+    keyCatcher.forceActiveFocus()
+  }
+
+  function cancelGrade() {
+    root.gradingId = 0
+    keyCatcher.forceActiveFocus()
+  }
+
+  function rowColor(item) {
+    if (item.status !== "open") return root.faint
+    return svc.isUrgent(item.due) ? root.urgent : svc.isNear(item.due) ? root.foreground : root.dim
+  }
+
+  function statusText(item) { // right-hand column: countdown, or the grade once it is in
+    if (item.status === "open") return svc.fmtRel(item.due)
+    return item.grade !== "" ? item.grade : "done"
   }
 
   onOpenedChanged: {
-    if (opened) {
-      root.cursorActive = false
-      root.cursorRow = 0
-    }
+    root.cursorActive = false
+    root.cursorRow = 0
+    root.cursorCol = 0
+    root.gradingId = 0
   }
 
   Connections {
@@ -108,21 +176,30 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(320))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(400))
+    contentWidth: panel.fittedContentWidth(Style.space(430))
+    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(520))
 
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
+      // The grade field owns the keyboard while it is open (same pattern as
+      // the wifi passphrase prompt): Esc/Enter there close it, nothing else
+      // leaks out to the cursor model.
+      blocked: root.gradingId > 0
       onCloseRequested: root.close()
       onMoveRequested: function (dx, dy) { root.moveCursor(dx, dy) }
+      onActivateRequested: root.activateCursor()
       onDeleteRequested: root.removeSelected()
       onTabRequested: function (direction) { root.switchPanel(direction) }
+      onTextKey: function (t) {
+        if (t === "d" || t === "D") root.toggleSelected()
+        else if (t === "g" || t === "G") root.gradeSelected()
+      }
 
       Column {
         id: column
         width: parent.width
-        spacing: Style.space(8)
+        spacing: Style.space(6)
 
         PanelSectionHeader {
           text: "DEADLINES"
@@ -149,15 +226,21 @@ Panel {
             required property var modelData
             required property int index
 
+            readonly property bool isDone: modelData.status !== "open"
+            readonly property bool grading: root.gradingId === modelData.id
+            readonly property color textColor: isDone ? root.dim : root.foreground
+
             width: column.width
             implicitHeight: rowContent.implicitHeight + Style.space(10)
-            hasCursor: root.cursorActive && root.cursorRow === index
+            hasCursor: root.cellHot(index, 0)
             foreground: root.foreground
 
             MouseArea {
               anchors.fill: parent
               hoverEnabled: true
-              onContainsMouseChanged: if (containsMouse) root.hoverCursor(row.index)
+              cursorShape: Qt.PointingHandCursor
+              onContainsMouseChanged: if (containsMouse) root.hoverCursor(row.index, 0)
+              onClicked: svc.toggleDone(row.modelData)
             }
 
             ColumnLayout {
@@ -177,29 +260,98 @@ Panel {
                   Layout.fillWidth: true
                   textFormat: Text.PlainText
                   elide: Text.ElideRight
-                  text: row.modelData.title
-                  color: root.foreground
+                  text: (row.isDone ? "✓ " : "○ ") + row.modelData.title
+                  color: row.textColor
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.body
+                  font.strikeout: row.isDone
                 }
 
                 Text {
                   textFormat: Text.PlainText
-                  text: svc.fmtRel(row.modelData.due)
-                  color: root.rowColor(row.modelData.due)
+                  text: root.statusText(row.modelData)
+                  color: root.rowColor(row.modelData)
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.body
                 }
               }
 
-              Text {
+              RowLayout {
                 Layout.fillWidth: true
-                textFormat: Text.PlainText
-                elide: Text.ElideRight
-                text: svc.fmtWhen(row.modelData.due)
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
+                spacing: Style.space(4)
+
+                Text {
+                  Layout.fillWidth: true
+                  textFormat: Text.PlainText
+                  elide: Text.ElideRight
+                  text: svc.fmtWhen(row.modelData.due)
+                    + (row.isDone && row.modelData.doneAt > 0 ? "  ·  handed in " + svc.fmtDay(row.modelData.doneAt) : "")
+                  color: row.isDone ? root.faint : root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+
+                // Action chips. Hidden while this row is being graded so the
+                // editor gets the full line.
+                Repeater {
+                  model: row.grading ? [] : [
+                    { col: 1, label: row.modelData.grade !== "" ? "grade " + row.modelData.grade : "grade", tip: "Type the grade (g)" },
+                    { col: 2, label: "hide", tip: "Keep the record, drop it from the list" },
+                    { col: 3, label: "✕", tip: "Delete (x)" }
+                  ]
+
+                  Button {
+                    required property var modelData
+
+                    text: modelData.label
+                    tooltipText: modelData.tip
+                    fontSize: Style.font.caption
+                    fontFamily: root.fontFamily
+                    foreground: row.textColor
+                    horizontalPadding: Style.space(6)
+                    verticalPadding: Style.space(1)
+                    hasCursor: root.cellHot(row.index, modelData.col)
+                    onHovered: function (h) {
+                      if (h) root.hoverCursor(row.index, modelData.col)
+                      // Leaving a chip for the row body hands the cursor
+                      // back to column 0; the row's own MouseArea stays
+                      // hovered throughout, so it would not re-fire.
+                      else if (root.cellHot(row.index, modelData.col)) root.cursorCol = 0
+                    }
+                    onClicked: {
+                      root.hoverCursor(row.index, modelData.col)
+                      root.activateCursor()
+                    }
+                  }
+                }
+              }
+
+              RowLayout {
+                visible: row.grading
+                Layout.fillWidth: true
+                spacing: Style.space(6)
+
+                TextField {
+                  id: gradeField
+                  Layout.fillWidth: true
+                  placeholderText: "Grade, e.g. 7.5 or A- · empty clears"
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  foreground: root.foreground
+                  horizontalPadding: Style.space(6)
+                  verticalPadding: Style.space(2)
+                  text: row.grading ? row.modelData.grade : ""
+
+                  // Handle Return/Escape here and accept them. The text
+                  // input itself ignores Return after emitting accepted, so
+                  // the same press would bubble up to the key catcher — which
+                  // finishGrade has just unblocked — and fire "activate" on
+                  // whatever cell the cursor is on, reopening the editor.
+                  Keys.onReturnPressed: function (event) { event.accepted = true; root.finishGrade(row.modelData, text.trim()) }
+                  Keys.onEnterPressed: function (event) { event.accepted = true; root.finishGrade(row.modelData, text.trim()) }
+                  Keys.onEscapePressed: function (event) { event.accepted = true; root.cancelGrade() }
+                  onVisibleChanged: if (visible) Qt.callLater(function () { gradeField.forceActiveFocus(); gradeField.selectAll() })
+                }
               }
             }
           }
@@ -219,8 +371,11 @@ Panel {
           visible: svc.items.length > 0
           width: parent.width
           textFormat: Text.PlainText
-          text: "x removes the selected deadline"
-          color: root.dim
+          wrapMode: Text.WordWrap
+          text: root.gradingId > 0
+            ? "Enter saves the grade · Esc cancels"
+            : "↑↓ ←→ move · Enter act · d done · g grade · x remove"
+          color: root.faint
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
         }

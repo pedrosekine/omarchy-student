@@ -1,4 +1,4 @@
-# omarchy-student-pomodoro
+# omarchy-student
 
 Hybrid Pomodoro for Omarchy Quattro: CLI that works in terminal + thin bar display.
 Keyboard-first v0.1.
@@ -38,7 +38,7 @@ pomo deadline list --all --json
 pomo status               # timer only
 ```
 
-Files live in `~/.local/state/omarchy-student-pomodoro/`:
+Files live in `~/.local/state/omarchy-student/`:
 
 | File | What |
 |------|------|

@@ -1,16 +1,16 @@
-# Plan — omarchy-student-pomodoro
+# Plan — omarchy-student
 
 ## Architecture: Hybrid
 - `cli/` — single-source timer core (bash/python first, Rust later if needed)
-  - state file: `~/.local/state/omarchy-student-pomodoro/state.json`
+  - state file: `~/.local/state/omarchy-student/state.json`
   - commands: start, pause, resume, toggle, reset, skip, status
 - `plugin/` — thin Omarchy bar widget (v0.2+) that calls `pomo status`
   - `manifest.json`, `BarWidget.qml`, `Service.qml`
 
 ## Steps (one at a time)
 - [x] Step 1 — folder + README + this plan
-- [x] Step 2 — `gh repo create pedrosekine/omarchy-student-pomodoro --public --source .` (done, origin set)
-- [x] Step 3 — v0.1 CLI prototype: `cli/pomo` bash script + state file
+- [x] Step 2 — `gh repo create pedrosekine/omarchy-student --public --source .` (done, origin set)
+- [x] Step 3 — v0.1 CLI prototype: `cli/pomo` bash script + state file — on PATH via `ln -sfn "$PWD/cli/pomo" ~/.local/bin/pomo` (absolute target: re-link after moving the repo, or the bindings and both widgets fail with "binary could not be found")
 - [x] Step 4 — Hypr bindings: `SUPER+ALT+P` toggle, `SUPER+ALT+N` skip in `~/.config/hypr/bindings.lua` (SUPER+P was taken by Pseudo window)
 - [x] Step 5 — v0.2 bar widget: `plugin/` QML (`student.pomo`: countdown label + progress popup, left=popup, right=toggle, middle=skip). Installed as real files in `~/.config/omarchy/plugins/student.pomo` (symlinks not allowed there — copy on change, shell auto-reloads).
 - [x] Step 6 — session counter: `pomo stats [day|week|month|--json]` (calendar week Mon–Sun) + popup segmented Day/Week/Month selector with live count. Counts `focus started` lines in `pomo.log`.
@@ -47,6 +47,10 @@
       QML into `~/.config/omarchy/plugins/` run `omarchy restart shell`.
 - [ ] Later — deadline entry from the popup, `.ics` import for whoever *does*
       have a working feed, analytics (`history`), daily counter
+- [ ] Step 14 — the diary: today's note is the capture surface, a local watcher
+      triggers a cloud agent that replies inline, consent is per block. Timer and
+      deadlines become features inside this surface. End-to-end plan with phases
+      and open questions: `docs/todo-capture.md`
 
 ## v0.1 Keyboard contract
 ```bash
@@ -66,7 +70,7 @@ o.bind("SUPER + ALT + D", "Deadlines popup", "omarchy-shell student.deadline tog
 ## Decisions
 Longer-form design thinking lives in `docs/student-os.md` (agentic-first, cadence, progress, research).
 
-- 2026-09-05: Hybrid, name omarchy-student-pomodoro, v0.1 = keyboard shortcuts
+- 2026-09-05: Hybrid, name omarchy-student, v0.1 = keyboard shortcuts
 - 2026-09-07: Deadlines are manual-first and stay that way. Import was weighed
   and rejected for now: over years of study the feeds were "nothing but chaotic",
   and the deadlines that drive a study week (read ch.7, draft by Sunday, meet
@@ -83,3 +87,16 @@ Longer-form design thinking lives in `docs/student-os.md` (agentic-first, cadenc
   stay distinguishable on sight (integer = manual, UID = imported). Revisit
   only if a second writer ever appears.
 - 2026-09-05: Calendar parked — direct Google/Outlook sync needs two OAuth flows, too heavy. When revisited, start with local `.ics` export (importable anywhere), not live sync. Next: daily counter.
+- 2026-09-15: GitHub for phone capture goes in as an *inbox*, not the truth.
+  Reasons: no daemon, no API, no auth on this machine (student-os.md principle
+  1); Tailscale on a phone is not free (~9%/day typical, known spikes); and
+  GitHub can't push to a sleeping laptop, so the laptop pulls on a timer.
+  Priority vocabulary is must/should/could — consequence, not date. Full
+  reasoning in `docs/todo-capture.md`.
+- 2026-09-16: The plan pivots. Daily note, not a todo app: the agent reads and
+  answers in the note, and consent is per block, enforced by local code that
+  logs every payload before inference. The agent may see drafts and essays but
+  produces nothing submittable. The loop runs on the laptop only — one device
+  must be enough, and a second always-awake machine would mean two writers over
+  file sync. Cloud model through opencode; the surface comes after the loop.
+  Details and phases in `docs/todo-capture.md`.

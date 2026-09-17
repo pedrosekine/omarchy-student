@@ -37,7 +37,9 @@ See `docs/plan.md` for full steps.
 
 `plugin-page/` is a full-screen overlay for `omarchy-shell`: today's note as a
 blank sheet in the current theme, saved on every keystroke. `SUPER+ALT+=` or
-the `󰏫` bar glyph opens it, `Esc` closes. Blocks the agent has seen are
+the `󰏫` bar glyph opens it, `Esc` closes. `SUPER+ALT+\` opens the same
+sheet as a normal window to tile beside something; `Ctrl+P` flips between
+the two. Blocks the agent has seen are
 veiled; a block with a reply carries a gutter mark and its reply shows in the
 margin to the right when asked. Finishing an `@` or `?` line stages the block
 (hollow mark) and asks "send to agent?" under the cursor with *no*

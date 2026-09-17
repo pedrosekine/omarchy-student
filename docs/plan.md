@@ -145,7 +145,17 @@
             converts PDFs to markdown once with pdftotext; `.md` files there
             are always in the payload. `- []` and a bare `[]` at line start
             become `- [ ] `.
-      - [ ] 14.6 rendering — headings, checkboxes, private callouts in the page.
+      - [x] 14.5b alongside — the same content tree reparented into a
+            Quickshell `FloatingWindow` (title "Page — today's note"), which
+            Hyprland tiles like any app. `SUPER+ALT+backslash` summons it
+            (`{"shape":"alongside"}` payload), `Ctrl+P` or the header "pin"
+            mark flips between overlay and window, Esc does nothing in the
+            window, closing the window closes the page. The margin opens
+            inside the window (45% width) instead of beside the sheet.
+      - [ ] 14.6 rendering — a block-based editor (one text field per
+            block, plain markdown inside) so headings, checkboxes, private
+            callouts, and block spacing can be drawn without rewriting the
+            note; decided to wait for a few days of use first.
       - [ ] 14.7 focus mode · 14.8 study mode · 14.9 phone capture, external reading.
 - [ ] Parked — deadline entry from the popup (absorbed by 14.4), `.ics` import,
       analytics (`history`), daily counter
@@ -164,6 +174,7 @@ o.bind("SUPER + ALT + N", "Pomo skip", "pomo skip")
 o.bind("SUPER + ALT + O", "Pomo popup", "omarchy-shell student.pomo toggle")
 o.bind("SUPER + ALT + D", "Deadlines popup", "omarchy-shell student.deadline toggle")
 o.bind("SUPER + ALT + equal", "Page (today's note)", "omarchy-shell shell toggle student.page '{}'")
+o.bind("SUPER + ALT + backslash", "Page alongside", "omarchy-shell shell summon student.page '{\"shape\":\"alongside\"}'")
 ```
 
 ## Decisions

@@ -7,7 +7,10 @@ import qs.Ui
 import "Blocks.js" as Blocks
 
 // The page: today's note as a blank sheet in the shell, with the agent in
-// the margin.
+// the margin. Two shapes of the same sheet: the overlay (a layer over
+// everything, Esc leaves) and alongside (a normal Hyprland window you tile
+// next to slides or a PDF; Esc does nothing there). Ctrl+P pins the overlay
+// into a window and back; the pin mark in the header says which you are in.
 //
 // No file tree, no chrome. A themed sheet, the date, the text. Every keystroke
 // is saved (coalesced over a few hundred milliseconds, flushed on Enter and
@@ -51,6 +54,8 @@ Item {
   property var manifest: null
 
   property bool opened: false
+  property string shape: "overlay"   // "overlay" | "alongside"
+  readonly property bool alongside: shape === "alongside"
 
   readonly property color background: Color.menu.background
   readonly property color foreground: Color.menu.text
@@ -64,12 +69,14 @@ Item {
   readonly property string fontFamily: Style.font.family
   readonly property int textSize: Style.font.heading
 
-  readonly property int sheetWidth: Math.min(Style.space(760), panel.width - Style.space(48))
+  readonly property int sheetWidth: Math.min(Style.space(760), content.width - Style.space(48))
   readonly property int sheetMargin: Style.space(28)
-  readonly property int sheetPadding: Style.space(44)
+  readonly property int sheetPadding: alongside ? Style.space(28) : Style.space(44)
   readonly property int marginGap: Style.space(18)
   readonly property int gutter: Style.space(18)
-  readonly property int marginWidth: Math.max(0, Math.min(Style.space(300), panel.width - (panel.width + sheetWidth) / 2 - marginGap - sheetMargin))
+  readonly property int marginWidth: alongside
+    ? Math.max(0, Math.min(Style.space(300), Math.round(content.width * 0.45)))
+    : Math.max(0, Math.min(Style.space(300), content.width - (content.width + sheetWidth) / 2 - marginGap - sheetMargin))
 
   property string dateLabel: ""
   property bool applying: false
@@ -104,6 +111,9 @@ Item {
   readonly property string problem: svc.configError || svc.error
 
   function open(payloadJson) {
+    var payload = ({})
+    try { payload = JSON.parse(payloadJson || "{}") } catch (e) { payload = ({}) }
+    root.shape = payload.shape === "alongside" ? "alongside" : "overlay"
     root.opened = true
     root.dateLabel = Qt.formatDate(new Date(), "dddd d MMMM")
     root.openPassPending = true
@@ -133,6 +143,13 @@ Item {
   function toggle() {
     if (root.opened) root.dismiss()
     else root.open("{}")
+  }
+
+  // Ctrl+P: the same sheet, the other shape.
+  function togglePin() {
+    root.flush()
+    root.shape = root.alongside ? "overlay" : "alongside"
+    Qt.callLater(function () { editor.forceActiveFocus() })
   }
 
   // Disk → editor. Guarded so the resulting textChanged does not look like
@@ -728,32 +745,59 @@ Item {
 
   PanelWindow {
     id: panel
-    visible: root.opened
+    visible: root.opened && !root.alongside
     anchors { top: true; bottom: true; left: true; right: true }
     color: "transparent"
     WlrLayershell.namespace: "student-page"
     WlrLayershell.layer: WlrLayer.Overlay
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
     exclusionMode: ExclusionMode.Ignore
+  }
+
+  // The alongside shape: an ordinary window, tiled and moved with the
+  // keys the student already has. Closing it from the compositor closes
+  // the page.
+  FloatingWindow {
+    id: win
+    visible: root.opened && root.alongside
+    title: "Page — today's note"
+    color: root.background
+    implicitWidth: Style.space(680)
+    implicitHeight: Style.space(900)
+    minimumSize: Qt.size(Style.space(360), Style.space(300))
+    onVisibleChanged: {
+      if (visible) Qt.callLater(function () { editor.forceActiveFocus() })
+      else if (root.opened && root.alongside) root.dismiss()
+    }
+  }
+
+  // One content tree, whichever window is showing.
+  Item {
+    id: content
+    parent: root.alongside ? win.contentItem : panel.contentItem
+    anchors.fill: parent
 
     Rectangle {
       anchors.fill: parent
+      visible: !root.alongside
       color: root.scrim
     }
 
     MouseArea {
       anchors.fill: parent
+      enabled: !root.alongside
       onClicked: root.dismiss()
     }
 
     BorderSurface {
       id: sheet
-      width: root.sheetWidth
-      height: panel.height - root.sheetMargin * 2
-      anchors.centerIn: parent
-      radius: Style.cornerRadius
+      x: root.alongside ? 0 : Math.round((content.width - width) / 2)
+      y: root.alongside ? 0 : root.sheetMargin
+      width: root.alongside ? content.width - (root.marginOpen ? root.marginWidth + root.marginGap : 0) : root.sheetWidth
+      height: root.alongside ? content.height : content.height - root.sheetMargin * 2
+      radius: root.alongside ? 0 : Style.cornerRadius
       color: root.background
-      borderSpec: root.borderSpec
+      borderSpec: root.alongside ? Border.none() : root.borderSpec
       padding: root.sheetPadding
 
       MouseArea {
@@ -789,6 +833,18 @@ Item {
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
             spacing: Style.space(10)
+
+            // The pin: which shape you are in. Ctrl+P or a click flips it.
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              textFormat: Text.PlainText
+              text: "pin"
+              color: root.alongside ? root.foreground : root.faint
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              Behavior on color { ColorAnimation { duration: 240 } }
+              MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.togglePin() }
+            }
 
             // The agent mark: faint at rest, brighter while a run is in
             // flight, accent while a reply in this note is still unread.
@@ -909,7 +965,10 @@ Item {
               var alt = event.modifiers & Qt.AltModifier
               if (root.askKey(event)) { event.accepted = true; return }
               if (event.key === Qt.Key_Escape) {
-                root.dismiss()
+                if (!root.alongside) root.dismiss()
+                event.accepted = true
+              } else if (event.key === Qt.Key_P && ctrl) {
+                root.togglePin()
                 event.accepted = true
               } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
                 if (ctrl) { root.sendCurrent(); event.accepted = true; return }
@@ -1003,14 +1062,13 @@ Item {
     BorderSurface {
       id: margin
       visible: root.marginWidth > 0 && root.problem === "" && root.marginOpen
-      anchors.left: sheet.right
-      anchors.leftMargin: root.marginGap
-      anchors.top: sheet.top
-      anchors.bottom: sheet.bottom
+      x: sheet.x + sheet.width + root.marginGap
+      y: sheet.y
+      height: sheet.height
       width: root.marginWidth
-      radius: Style.cornerRadius
+      radius: root.alongside ? 0 : Style.cornerRadius
       color: root.background
-      borderSpec: root.borderSpec
+      borderSpec: root.alongside ? Border.none() : root.borderSpec
       padding: Style.space(22)
 
       MouseArea { anchors.fill: parent; onClicked: {} }

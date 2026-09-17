@@ -162,7 +162,22 @@ def main() -> int:
         r = t.agent("context", "--trigger", "open", "--date", "2026.09.17")
         check(r.returncode != 0 and "agent: false" in r.stderr, "agent: false day refused")
 
-        # 6. stray editor: hash of an edited block no longer matches → refused, no run
+        # 6. dive-in: chat continues the session, ack marks it read
+        t.note.write_text(NOTE)
+        before = (t.note.read_bytes(), t.note.stat().st_mtime_ns)
+        t.set_reply(reply="Because you wrote it was unclear.")
+        r = t.agent("chat", "--hash", at_block["hash"], "--message", "why do you think so?", "--date", "2026.09.17")
+        check(r.returncode == 0, f"chat exits 0 ({r.stderr.strip()})")
+        s = json.loads(st.read_text())
+        rec = s["blocks"][at_block["hash"]]
+        check([c["role"] for c in rec.get("chat", [])] == ["student", "agent"], "chat turns recorded")
+        check(rec.get("read") is False, "new agent turn is unread")
+        check("**you:** why do you think so?" in tr.read_text(), "chat turn in transcript")
+        check(t.note.read_bytes() == before[0], "note still untouched after chat")
+        r = t.agent("ack", "--hash", at_block["hash"], "--date", "2026.09.17")
+        check(r.returncode == 0 and json.loads(st.read_text())["blocks"][at_block["hash"]]["read"] is True, "ack marks read")
+
+        # 7. stray editor: hash of an edited block no longer matches → refused, no run
         t.note.write_text(NOTE)
         r = t.agent("run", "--trigger", "question", "--hash", "deadbeef", "--date", "2026.09.17")
         check(r.returncode != 0, "unknown block hash refused")

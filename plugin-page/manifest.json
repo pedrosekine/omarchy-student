@@ -6,10 +6,19 @@
   "author": "student",
   "description": "Today's note as a blank page in the shell",
   "kinds": [
-    "overlay"
+    "overlay",
+    "bar-widget"
   ],
   "keepLoaded": true,
   "entryPoints": {
-    "overlay": "Page.qml"
+    "overlay": "Page.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Page",
+    "description": "Today's note, one click away; lights up when a reply is waiting",
+    "category": "Time",
+    "allowMultiple": false,
+    "defaultSection": "right"
   }
 }

@@ -85,7 +85,21 @@
             run: silent open pass $0.0009; a mention got a specific,
             evidence-based reply for $0.0005. Watch: model latency varied
             1 s → 10 s → 50 s across three calls; provider-side.
-      - [ ] 14.3 the overlay — seen/reply states, block navigation, dive-in chat.
+      - [x] 14.3 the overlay — blocks the agent has seen are veiled (a
+            half-transparent wash in the sheet's own colour over the text, so
+            the theme decides the look); blocks with a reply get a gutter
+            mark, accent until looked at, dim after. The margin: a second,
+            narrower sheet to the right showing the reply, proposals, and
+            the dive-in chat for the block under the cursor (or the nearest
+            one above when the cursor sits on a blank line); looking at it
+            for a second marks it read (`student-agent ack`). `Ctrl+Enter`
+            focuses the chat field, Enter sends (`student-agent chat`
+            continues the block's opencode session), Esc returns to the
+            note. Bar glyph `󰏫` (the plugin is now `overlay` + `bar-widget`)
+            toggles the page and turns active when a reply is unread.
+            `AgentState.qml` reads today's state file for both. Gotcha: the
+            page is keepLoaded, so QML changes need `omarchy restart shell`,
+            not just a copy.
       - [ ] 14.4 proposals — tick to execute, conflict flag, open-checkboxes panel.
       - [ ] 14.5 knowledge — profile/subjects/patterns, intention→outcome,
             suggestions with evidence, curriculum folder.

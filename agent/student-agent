@@ -2,6 +2,8 @@
 """student-agent — the loop between today's note and the model.
 
     student-agent run --trigger <kind> [--hash <block>] [--date YYYY.MM.DD]
+    student-agent chat --hash <block> --message <text>         # dive in: continue that block's session
+    student-agent ack --hash <block>                           # the student has seen the reply
     student-agent context --trigger <kind> [--hash <block>]   # payload only, no model
     student-agent state [--date YYYY.MM.DD]                    # today's state JSON
     student-agent install                                      # opencode agent def + dirs
@@ -184,14 +186,19 @@ def build_payload(paths: Paths, trigger: str, block: dict | None, visible: list[
 
 # ------------------------------------------------------------------- model
 
-def run_model(cfg: dict, paths: Paths, payload: str) -> dict:
-    """Run one opencode pass. Returns {text, session, cost, tokens, events, error}."""
+def run_model(cfg: dict, paths: Paths, payload: str, session: str = "", message: str = "Context follows on stdin.") -> dict:
+    """Run one opencode pass. Returns {text, session, cost, tokens, events, error}.
+
+    With `session`, continues an existing opencode session (dive-in), so the
+    model keeps what it already said about that block."""
     paths.cwd.mkdir(parents=True, exist_ok=True)
     cmd = [cfg.get("opencode", "opencode"), "run", "--pure", "--format", "json",
            "--agent", cfg.get("agent", "student"), "--dir", str(paths.cwd)]
     if cfg.get("model"):
         cmd += ["--model", cfg["model"]]
-    cmd.append("Context follows on stdin.")
+    if session:
+        cmd += ["--session", session]
+    cmd.append(message)
     try:
         proc = subprocess.run(cmd, input=payload, capture_output=True, text=True, timeout=600)
     except FileNotFoundError:
@@ -254,19 +261,32 @@ def parse_reply(text: str) -> dict:
 # ------------------------------------------------------------------- apply
 
 def apply(cfg: dict, paths: Paths, trigger: str, block: dict | None, visible: list[dict],
-          result: dict, reply: dict, payload_file: Path) -> dict:
+          result: dict, reply: dict, payload_file: Path, hash_: str = "", message: str = "") -> dict:
     now = dt.datetime.now()
     at = now.isoformat(timespec="seconds")
     state = load_state(paths)
-    hash_ = block["hash"] if block else ""
+    if block:
+        hash_ = block["hash"]
+    chat = trigger == "chat"
 
     # Every block the model saw is now "seen"; the fired one gets the reply.
     for b in visible:
         state["blocks"].setdefault(b["hash"], {"state": "seen", "at": at})
-    if block:
+    if chat:
+        rec = state["blocks"].setdefault(hash_, {"state": "seen", "at": at})
+        turns = rec.setdefault("chat", [])
+        turns.append({"role": "student", "text": message, "at": at})
+        turns.append({"role": "agent", "text": reply["reply"], "at": at, "cost": result["cost"]})
+        rec["session"] = result["session"] or rec.get("session", "")
+        rec["read"] = False
+        if rec.get("state") != "reply":
+            rec["state"] = "reply"
+            rec["reply"] = rec.get("reply") or ""
+        rec["proposals"] = rec.get("proposals", []) + reply["proposals"]
+    elif block:
         rec = state["blocks"].setdefault(hash_, {})
         rec.update({"state": "reply" if reply["reply"] else "seen", "trigger": trigger,
-                    "reply": reply["reply"], "proposals": reply["proposals"],
+                    "reply": reply["reply"], "proposals": reply["proposals"], "read": False,
                     "session": result["session"], "at": at, "cost": result["cost"]})
     for s in reply["suggestions"]:
         state["suggestions"].append({"text": str(s.get("text") or ""), "evidence": str(s.get("evidence") or ""),
@@ -288,9 +308,12 @@ def apply(cfg: dict, paths: Paths, trigger: str, block: dict | None, visible: li
         append_text(paths, paths.transcript,
                     f"# {paths.stamp} — agent\n\nNote: [[{paths.daily_dir.relative_to(paths.vault)}/{paths.stamp}]]\n")
     sec = [f"\n## {now.strftime('%H:%M')} · {trigger}" + (f" · `{hash_}`" if hash_ else ""), ""]
-    if block:
+    if block and not chat:
         sec += ["> " + l for l in block["text"].split("\n")] + [""]
-    sec.append(reply["reply"] if reply["reply"] else "_(nothing to add)_")
+    if chat:
+        sec += [f"**you:** {message}", "", f"**agent:** {reply['reply'] or '_(nothing to add)_'}"]
+    else:
+        sec.append(reply["reply"] if reply["reply"] else "_(nothing to add)_")
     for p in reply["proposals"]:
         if p.get("kind") == "deadline":
             sec.append(f"- [ ] add deadline: {p.get('title', '')} — {p.get('when', '')}"
@@ -367,6 +390,66 @@ def cmd_run(cfg: dict, args) -> int:
     return 0
 
 
+def cmd_chat(cfg: dict, args) -> int:
+    """Dive in: the student talks to the agent about one block."""
+    message = (args.message or "").strip()
+    if not message:
+        raise Fail("--message is empty")
+    date = dt.datetime.strptime(args.date, moment_to_strftime(cfg["daily"].get("format", "YYYY-MM-DD"))).date() \
+        if args.date else dt.date.today()
+    paths = Paths(cfg, date)
+    state = load_state(paths)
+    rec = state["blocks"].get(args.hash) or {}
+    session = rec.get("session", "")
+    try:
+        text = paths.note.read_text()
+    except FileNotFoundError:
+        raise Fail(f"no note for {paths.stamp}")
+    blks = blocklib.split(text)
+    if note_is_private(blks):
+        raise Fail("today is marked agent: false")
+    visible = visible_blocks(blks)
+    block = next((b for b in visible if b["hash"] == args.hash), None)
+    paths.payloads.mkdir(parents=True, exist_ok=True)
+    stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    payload_file = paths.payloads / f"{stamp}-chat-{args.hash}.md"
+    if session:
+        # The session already holds the context and the first reply; only the
+        # student's words travel. Logged all the same.
+        payload = f"The student replies about block {args.hash}:\n\n{message}\n\nAnswer with the same JSON contract.\n"
+        payload_file.write_text(payload)
+        result = run_model(cfg, paths, "", session=session, message=payload)
+    else:
+        if block is None:
+            raise Fail(f"block {args.hash} has no session and is not in the visible note")
+        payload = build_payload(paths, "mention", block, visible)
+        payload += f"\n# The student says\n\n{message}\n"
+        payload_file.write_text(payload)
+        result = run_model(cfg, paths, payload)
+    payload_file.with_suffix(".events.jsonl").write_text(result["events"])
+    reply = parse_reply(result["text"]) if not result["error"] else \
+        {"reply": "", "proposals": [], "suggestions": [], "knowledge": []}
+    apply(cfg, paths, "chat", None, visible, result, reply, payload_file, hash_=args.hash, message=message)
+    if result["error"]:
+        print(f"error: {result['error']}", file=sys.stderr)
+        return 1
+    print(f"chat {args.hash}: {'reply' if reply['reply'] else 'silent'} · ${result['cost']:.4f} · {result['tokens']['total']} tokens")
+    return 0
+
+
+def cmd_ack(cfg: dict, args) -> int:
+    date = dt.datetime.strptime(args.date, moment_to_strftime(cfg["daily"].get("format", "YYYY-MM-DD"))).date() \
+        if args.date else dt.date.today()
+    paths = Paths(cfg, date)
+    state = load_state(paths)
+    rec = state["blocks"].get(args.hash)
+    if not rec or rec.get("read"):
+        return 0
+    rec["read"] = True
+    write_atomic(paths, paths.state, json.dumps(state, indent=2, ensure_ascii=False) + "\n")
+    return 0
+
+
 def cmd_state(cfg: dict, args) -> int:
     date = dt.datetime.strptime(args.date, moment_to_strftime(cfg["daily"].get("format", "YYYY-MM-DD"))).date() \
         if args.date else dt.date.today()
@@ -395,12 +478,20 @@ def main(argv: list[str]) -> int:
         p.add_argument("--trigger", required=True, choices=TRIGGERS)
         p.add_argument("--hash", default="")
         p.add_argument("--date", default="")
+    p = sub.add_parser("chat")
+    p.add_argument("--hash", required=True)
+    p.add_argument("--message", required=True)
+    p.add_argument("--date", default="")
+    p = sub.add_parser("ack")
+    p.add_argument("--hash", required=True)
+    p.add_argument("--date", default="")
     sub.add_parser("state").add_argument("--date", default="")
     sub.add_parser("install")
     args = ap.parse_args(argv)
     try:
         cfg = load_config()
-        return {"run": cmd_run, "context": cmd_context, "state": cmd_state, "install": cmd_install}[args.cmd](cfg, args)
+        return {"run": cmd_run, "chat": cmd_chat, "ack": cmd_ack, "context": cmd_context,
+                "state": cmd_state, "install": cmd_install}[args.cmd](cfg, args)
     except Fail as e:
         print(f"student-agent: {e}", file=sys.stderr)
         return 2

@@ -6,7 +6,8 @@ import qs.Commons
 import qs.Ui
 import "Blocks.js" as Blocks
 
-// The page: today's note as a blank sheet in the shell.
+// The page: today's note as a blank sheet in the shell, with the agent in
+// the margin.
 //
 // No file tree, no chrome. A themed sheet, the date, the text. Every keystroke
 // is saved (coalesced over a few hundred milliseconds, flushed on Enter and
@@ -20,9 +21,13 @@ import "Blocks.js" as Blocks
 //
 // The page is also the trigger. Finishing a checkbox line, an `@` line, or a
 // line ending in `?` (Enter), ticking a box, or opening the page hands the
-// block to `student-agent`, after the save has landed on disk. The agent mark
-// in the header brightens while a run is in flight and turns accent when a
-// reply is waiting for a block that is still in the note.
+// block to `student-agent`, after the save has landed on disk.
+//
+// The agent's answers are painted, never inserted: a block the agent has
+// seen is veiled a little; a block with a reply carries a mark in the left
+// gutter, accent until you have looked at it. The margin to the right shows
+// the reply for the block under the cursor. Ctrl+Enter dives in: a plain
+// chat about that block, continuing the same session; Esc comes back.
 Item {
   id: root
 
@@ -36,30 +41,36 @@ Item {
   readonly property color foreground: Color.menu.text
   readonly property color border: Color.menu.border
   readonly property color scrim: Color.menu.scrim
+  readonly property color accent: Color.accent
   readonly property color dim: Util.alpha(foreground, 0.45)
   readonly property color faint: Util.alpha(foreground, 0.22)
   readonly property color urgent: Color.urgent
   readonly property var borderSpec: Border.surfaceSpec("menu", "border", border, Math.max(1, Style.space(2)))
   readonly property string fontFamily: Style.font.family
   readonly property int textSize: Style.font.heading
-  readonly property real lineHeight: 1.45
 
   readonly property int sheetWidth: Math.min(Style.space(760), panel.width - Style.space(48))
   readonly property int sheetMargin: Style.space(28)
   readonly property int sheetPadding: Style.space(44)
+  readonly property int marginGap: Style.space(18)
+  readonly property int gutter: Style.space(18)
+  readonly property int marginWidth: Math.max(0, Math.min(Style.space(300), panel.width - (panel.width + sheetWidth) / 2 - marginGap - sheetMargin))
 
   property string dateLabel: ""
   property bool applying: false
 
-  // Runner plumbing.
-  property var queuedRun: null
+  // Runner plumbing: one process at a time, the last request wins.
+  property var queued: null
   property bool running: false
+  property string runningHash: ""
   property bool openPassPending: false
-  property var agentState: ({})
-  property bool replyWaiting: false
   property int tickedCount: 0
 
-  readonly property color accent: Color.accent
+  // What is painted and what the margin shows.
+  property var paint: []
+  property string currentHash: ""
+  readonly property var currentRecord: agent.record(currentHash)
+  readonly property bool replyWaiting: root.hasUnreadInNote()
 
   readonly property string problem: svc.configError || svc.error
 
@@ -68,6 +79,7 @@ Item {
     root.dateLabel = Qt.formatDate(new Date(), "dddd d MMMM")
     root.openPassPending = true
     svc.openToday()
+    agent.reload()
     if (svc.ready) root.openPass()
     Qt.callLater(function () { editor.forceActiveFocus() })
   }
@@ -102,15 +114,21 @@ Item {
     root.applying = false
     root.tickedCount = root.countTicked(t)
     editor.cursorPosition = editor.length
-    root.refreshReplyWaiting()
+    root.scheduleRepaint()
   }
+
+  function flush() {
+    saveTimer.stop()
+    if (svc.ready) svc.save(editor.text)
+  }
+
+  // ------------------------------------------------------------ triggers
 
   function countTicked(t) {
     var m = t.match(/^\s*[-*+] \[[xX]\] /gm)
     return m ? m.length : 0
   }
 
-  // Which trigger, if any, a just-completed line is.
   function triggerFor(lineText) {
     var t = lineText.trim()
     if (/^@/.test(t)) return "mention"
@@ -125,40 +143,44 @@ Item {
     return k < 0 ? "" : blocks[k].hash
   }
 
-  // Hand a block to the runner once the note is on disk. One run at a time;
-  // a request that arrives mid-run waits and the last one wins.
+  // For the margin: the block under the cursor, or the nearest one above
+  // when the cursor rests on a blank line — which is where it lands right
+  // after finishing a line.
+  function hashNearLine(lineIndex) {
+    var blocks = Blocks.split(editor.text)
+    var k = Blocks.blockAt(blocks, lineIndex)
+    if (k < 0) for (var i = blocks.length - 1; i >= 0; i--) if (blocks[i].start <= lineIndex) { k = i; break }
+    return k < 0 ? "" : blocks[k].hash
+  }
+
   function requestRun(trigger, hash) {
     root.flush()
-    root.queuedRun = { trigger: trigger, hash: hash }
+    var cmd = [svc.runner, "run", "--trigger", trigger]
+    if (hash) cmd.push("--hash", hash)
+    root.enqueue(cmd, hash)
+  }
+
+  function requestChat(hash, message) {
+    root.flush()
+    root.enqueue([svc.runner, "chat", "--hash", hash, "--message", message], hash)
+  }
+
+  function enqueue(cmd, hash) {
+    root.queued = { cmd: cmd, hash: hash }
     if (!svc.saving) root.launchQueued()
   }
 
   function launchQueued() {
-    if (!root.queuedRun || root.running || svc.saving) return
-    var r = root.queuedRun
-    root.queuedRun = null
-    var cmd = [svc.runner, "run", "--trigger", r.trigger]
-    if (r.hash) cmd.push("--hash", r.hash)
+    if (!root.queued || root.running || svc.saving) return
+    var q = root.queued
+    root.queued = null
     root.running = true
-    runner.command = cmd
+    root.runningHash = q.hash
+    runner.command = q.cmd
     runner.running = true
   }
 
-  function refreshReplyWaiting() {
-    var st = root.agentState && root.agentState.blocks
-    if (!st) { root.replyWaiting = false; return }
-    var blocks = Blocks.split(editor.text)
-    for (var i = 0; i < blocks.length; i++) {
-      var rec = st[blocks[i].hash]
-      if (rec && rec.state === "reply") { root.replyWaiting = true; return }
-    }
-    root.replyWaiting = false
-  }
-
-  function flush() {
-    saveTimer.stop()
-    if (svc.ready) svc.save(editor.text)
-  }
+  // ------------------------------------------------------------ painting
 
   function lineBounds(pos) {
     var t = editor.text
@@ -168,8 +190,68 @@ Item {
     return { start: start, end: end, text: t.substring(start, end) }
   }
 
+  function lineIndexAt(pos) {
+    var n = 0
+    var t = editor.text
+    for (var i = 0; i < pos && i < t.length; i++) if (t.charCodeAt(i) === 10) n++
+    return n
+  }
+
+  function positionOfLine(lineIndex) {
+    var t = editor.text
+    var pos = 0
+    for (var k = 0; k < lineIndex; k++) {
+      var nl = t.indexOf("\n", pos)
+      if (nl < 0) return t.length
+      pos = nl + 1
+    }
+    return pos
+  }
+
+  function scheduleRepaint() { Qt.callLater(root.repaint) }
+
+  // Geometry for every block the agent knows about, in editor coordinates.
+  function repaint() {
+    var out = []
+    var blocks = Blocks.split(editor.text)
+    for (var i = 0; i < blocks.length; i++) {
+      var b = blocks[i]
+      var rec = agent.record(b.hash)
+      if (!rec) continue
+      var startPos = root.positionOfLine(b.start)
+      var endPos = Math.max(startPos, root.positionOfLine(b.end) - 1)
+      var r1 = editor.positionToRectangle(startPos)
+      var r2 = editor.positionToRectangle(endPos)
+      out.push({ hash: b.hash, y: r1.y, h: r2.y + r2.height - r1.y,
+                 reply: rec.state === "reply", unread: rec.state === "reply" && !rec.read })
+    }
+    root.paint = out
+    root.currentHash = root.hashNearLine(root.lineIndexAt(editor.cursorPosition))
+  }
+
+  function hasUnreadInNote() {
+    var p = root.paint
+    for (var i = 0; i < p.length; i++) if (p[i].unread) return true
+    return false
+  }
+
+  function jumpBlock(direction) {
+    var blocks = Blocks.split(editor.text)
+    if (blocks.length === 0) return
+    var line = root.lineIndexAt(editor.cursorPosition)
+    var target = -1
+    if (direction < 0) {
+      for (var i = blocks.length - 1; i >= 0; i--) if (blocks[i].start < line) { target = i; break }
+    } else {
+      for (var j = 0; j < blocks.length; j++) if (blocks[j].start > line) { target = j; break }
+    }
+    if (target < 0) return
+    editor.cursorPosition = root.positionOfLine(blocks[target].start)
+  }
+
   // Enter inside a list item carries the marker to the next line; Enter on
-  // an item with nothing after the marker removes the marker instead.
+  // an item with nothing after the marker removes the marker instead. The
+  // completed line decides whether the agent is called.
   function handleReturn() {
     var pos = editor.cursorPosition
     var line = root.lineBounds(pos)
@@ -195,44 +277,31 @@ Item {
     }
   }
 
-  function lineIndexAt(pos) {
-    var n = 0
-    var t = editor.text
-    for (var i = 0; i < pos && i < t.length; i++) if (t.charCodeAt(i) === 10) n++
-    return n
+  function diveIn() {
+    if (!root.currentRecord || root.marginWidth <= 0) return
+    chatField.forceActiveFocus()
   }
 
-  function positionOfLine(lineIndex) {
-    var t = editor.text
-    var pos = 0
-    for (var k = 0; k < lineIndex; k++) {
-      var nl = t.indexOf("\n", pos)
-      if (nl < 0) return t.length
-      pos = nl + 1
-    }
-    return pos
+  function sendChat() {
+    var msg = chatField.text.trim()
+    if (msg === "" || root.currentHash === "") return
+    chatField.text = ""
+    root.requestChat(root.currentHash, msg)
   }
 
-  // Ctrl+Up / Ctrl+Down: previous / next block start.
-  function jumpBlock(direction) {
-    var blocks = Blocks.split(editor.text)
-    if (blocks.length === 0) return
-    var line = root.lineIndexAt(editor.cursorPosition)
-    var target = -1
-    if (direction < 0) {
-      for (var i = blocks.length - 1; i >= 0; i--) if (blocks[i].start < line) { target = i; break }
-    } else {
-      for (var j = 0; j < blocks.length; j++) if (blocks[j].start > line) { target = j; break }
-    }
-    if (target < 0) return
-    editor.cursorPosition = root.positionOfLine(blocks[target].start)
-  }
+  // ------------------------------------------------------------ services
 
   Service {
     id: svc
     onLoaded: { root.applyText(svc.body); root.openPass() }
     onExternalChange: root.applyText(svc.body)
     onSavedNow: root.launchQueued()
+  }
+
+  AgentState {
+    id: agent
+    config: svc.config
+    onStateChanged: root.scheduleRepaint()
   }
 
   Process {
@@ -245,31 +314,34 @@ Item {
     }
     onExited: function (code, status) {
       root.running = false
-      stateFile.reload()
+      root.runningHash = ""
+      agent.reload()
       root.launchQueued()
     }
   }
 
-  // The runner's state file for today: which blocks it saw, which have a
-  // reply. Read-only here; the runner writes it atomically.
-  FileView {
-    id: stateFile
-    path: svc.statePath
-    watchChanges: true
-    printErrors: false
-    onLoaded: {
-      try { root.agentState = JSON.parse(text()) } catch (e) { root.agentState = ({}) }
-      root.refreshReplyWaiting()
+  // Looking at a reply for a moment marks it read — nothing else needs to.
+  Process { id: ackProc }
+  Timer {
+    id: ackTimer
+    interval: 1200
+    onTriggered: {
+      var rec = root.currentRecord
+      if (rec && rec.state === "reply" && !rec.read && root.currentHash !== "") {
+        ackProc.command = [svc.runner, "ack", "--hash", root.currentHash]
+        ackProc.running = true
+      }
     }
-    onLoadFailed: { root.agentState = ({}); root.replyWaiting = false }
-    onFileChanged: reload()
   }
+  onCurrentHashChanged: ackTimer.restart()
 
   Timer {
     id: saveTimer
     interval: 300
     onTriggered: root.flush()
   }
+
+  // ------------------------------------------------------------ window
 
   PanelWindow {
     id: panel
@@ -330,14 +402,13 @@ Item {
             font.pixelSize: Style.font.bodySmall
           }
 
-          // Right side: the agent mark and the save dot. The mark stands in
-          // for the template's link line, which the service keeps out of the
-          // editor; it will carry the reply-waiting state once there is one.
           Row {
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
             spacing: Style.space(10)
 
+            // The agent mark: faint at rest, brighter while a run is in
+            // flight, accent while a reply in this note is still unread.
             Text {
               visible: svc.header !== ""
               anchors.verticalCenter: parent.verticalCenter
@@ -349,8 +420,8 @@ Item {
               Behavior on color { ColorAnimation { duration: 240 } }
             }
 
-            // Saved / unsaved, as quietly as possible: a dot that brightens
-            // while a write is pending and settles once it landed.
+            // Saved / unsaved: a dot that brightens while a write is
+            // pending and settles once it landed.
             Rectangle {
               anchors.verticalCenter: parent.verticalCenter
               width: Style.space(6)
@@ -382,6 +453,7 @@ Item {
           anchors.top: header.bottom
           anchors.topMargin: Style.space(24)
           anchors.left: parent.left
+          anchors.leftMargin: -root.gutter
           anchors.right: parent.right
           anchors.bottom: parent.bottom
           clip: true
@@ -394,9 +466,26 @@ Item {
             else if (contentY + height <= r.y + r.height) contentY = r.y + r.height - height
           }
 
+          // Gutter marks for blocks with a reply.
+          Repeater {
+            model: root.paint
+            Rectangle {
+              required property var modelData
+              visible: modelData.reply
+              x: Style.space(2)
+              y: modelData.y
+              width: Style.space(3)
+              height: modelData.h
+              radius: width
+              color: modelData.unread ? root.accent : root.dim
+              Behavior on color { ColorAnimation { duration: 240 } }
+            }
+          }
+
           TextEdit {
             id: editor
-            width: flick.width
+            x: root.gutter
+            width: flick.width - root.gutter
             textFormat: TextEdit.PlainText
             wrapMode: TextEdit.Wrap
             selectByMouse: true
@@ -407,13 +496,14 @@ Item {
             selectedTextColor: root.foreground
             font.family: root.fontFamily
             font.pixelSize: root.textSize
-            // TextEdit has no line-height property; a slightly larger font
-            // box does the job of breathing room between lines.
             cursorVisible: activeFocus
             enabled: svc.ready
             tabStopDistance: 4 * Style.space(8)
 
             onCursorRectangleChanged: flick.ensureVisible(cursorRectangle)
+            onCursorPositionChanged: root.currentHash = root.hashNearLine(root.lineIndexAt(cursorPosition))
+            onWidthChanged: root.scheduleRepaint()
+            onContentHeightChanged: root.scheduleRepaint()
             onTextChanged: {
               if (root.applying) return
               svc.markPending(text)
@@ -424,31 +514,178 @@ Item {
                 if (hash !== "") root.requestRun("tick", hash)
               }
               root.tickedCount = ticked
-              root.refreshReplyWaiting()
+              root.scheduleRepaint()
             }
 
             Keys.priority: Keys.BeforeItem
             Keys.onPressed: function (event) {
+              var ctrl = event.modifiers & Qt.ControlModifier
               if (event.key === Qt.Key_Escape) {
                 root.dismiss()
                 event.accepted = true
               } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-                if (event.modifiers & (Qt.ShiftModifier | Qt.ControlModifier)) return
+                if (ctrl) { root.diveIn(); event.accepted = true; return }
+                if (event.modifiers & Qt.ShiftModifier) return
                 root.handleReturn()
                 Qt.callLater(root.flush)
                 event.accepted = true
               } else if (event.key === Qt.Key_Tab) {
                 editor.insert(editor.cursorPosition, "\t")
                 event.accepted = true
-              } else if (event.key === Qt.Key_Up && (event.modifiers & Qt.ControlModifier)) {
+              } else if (event.key === Qt.Key_Up && ctrl) {
                 root.jumpBlock(-1)
                 event.accepted = true
-              } else if (event.key === Qt.Key_Down && (event.modifiers & Qt.ControlModifier)) {
+              } else if (event.key === Qt.Key_Down && ctrl) {
                 root.jumpBlock(1)
                 event.accepted = true
               }
             }
           }
+
+          // The veil: blocks the agent has seen, and has nothing to say
+          // about, recede a little. Drawn over the text in the sheet's own
+          // colour so the theme decides how it looks.
+          Repeater {
+            model: root.paint
+            Rectangle {
+              required property var modelData
+              visible: !modelData.reply
+              x: root.gutter
+              y: modelData.y
+              width: editor.width
+              height: modelData.h
+              color: root.background
+              opacity: 0.5
+              z: 1
+            }
+          }
+        }
+      }
+    }
+
+    // The margin: the agent's side of the page, a narrower sheet beside the
+    // note. Shows whatever it has to say about the block under the cursor,
+    // and the field to talk back.
+    BorderSurface {
+      id: margin
+      visible: root.marginWidth > 0 && root.problem === "" && !!root.currentRecord
+      anchors.left: sheet.right
+      anchors.leftMargin: root.marginGap
+      anchors.top: sheet.top
+      anchors.bottom: sheet.bottom
+      width: root.marginWidth
+      radius: Style.cornerRadius
+      color: root.background
+      borderSpec: root.borderSpec
+      padding: Style.space(22)
+
+      MouseArea { anchors.fill: parent; onClicked: {} }
+
+      Flickable {
+        id: marginFlick
+        anchors.top: parent.top
+        anchors.topMargin: margin.contentTopInset + Style.space(4)
+        anchors.left: parent.left
+        anchors.leftMargin: margin.contentLeftInset
+        anchors.right: parent.right
+        anchors.rightMargin: margin.contentRightInset
+        anchors.bottom: chatBox.top
+        anchors.bottomMargin: Style.space(10)
+        clip: true
+        contentWidth: width
+        contentHeight: marginColumn.implicitHeight
+        boundsBehavior: Flickable.StopAtBounds
+
+        Column {
+          id: marginColumn
+          width: parent.width
+          spacing: Style.space(12)
+
+          Text {
+            width: parent.width
+            visible: root.running && root.runningHash === root.currentHash && root.currentHash !== ""
+            textFormat: Text.PlainText
+            text: "…"
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: root.textSize
+          }
+
+          Text {
+            width: parent.width
+            visible: !!(root.currentRecord && root.currentRecord.reply)
+            textFormat: Text.MarkdownText
+            wrapMode: Text.WordWrap
+            text: root.currentRecord && root.currentRecord.reply ? root.currentRecord.reply : ""
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.title
+          }
+
+          Repeater {
+            model: root.currentRecord && root.currentRecord.proposals ? root.currentRecord.proposals : []
+            Text {
+              required property var modelData
+              width: marginColumn.width
+              textFormat: Text.PlainText
+              wrapMode: Text.WordWrap
+              text: "○ " + (modelData.kind === "deadline"
+                ? "deadline: " + modelData.title + " — " + modelData.when + (modelData.subject ? " · " + modelData.subject : "")
+                : JSON.stringify(modelData))
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+          }
+
+          Repeater {
+            model: root.currentRecord && root.currentRecord.chat ? root.currentRecord.chat : []
+            Text {
+              required property var modelData
+              width: marginColumn.width
+              textFormat: modelData.role === "agent" ? Text.MarkdownText : Text.PlainText
+              wrapMode: Text.WordWrap
+              text: modelData.text
+              color: modelData.role === "agent" ? root.foreground : root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.title
+            }
+          }
+
+          Text {
+            width: parent.width
+            visible: !!(root.currentRecord && root.currentRecord.state === "reply") && !chatField.activeFocus
+            textFormat: Text.PlainText
+            text: "Ctrl+Enter to talk about this"
+            color: root.faint
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+        }
+      }
+
+      Item {
+        id: chatBox
+        anchors.left: parent.left
+        anchors.leftMargin: margin.contentLeftInset
+        anchors.right: parent.right
+        anchors.rightMargin: margin.contentRightInset
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: margin.contentBottomInset
+        height: chatField.visible ? chatField.implicitHeight : 0
+
+        TextField {
+          id: chatField
+          anchors.left: parent.left
+          anchors.right: parent.right
+          visible: !!root.currentRecord
+          placeholderText: "…"
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+          foreground: root.foreground
+          Keys.onReturnPressed: function (event) { event.accepted = true; root.sendChat() }
+          Keys.onEnterPressed: function (event) { event.accepted = true; root.sendChat() }
+          Keys.onEscapePressed: function (event) { event.accepted = true; editor.forceActiveFocus() }
         }
       }
     }

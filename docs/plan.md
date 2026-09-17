@@ -61,7 +61,7 @@
             first — the same file is set as Obsidian's daily-notes template.
             Install: copy to `~/.config/omarchy/plugins/student.page/`, add
             `{"id":"student.page"}` to `plugins[]` in shell.json, bind
-            `SUPER+ALT+J` → `omarchy-shell shell toggle student.page '{}'`.
+            `SUPER+ALT+=` → `omarchy-shell shell toggle student.page '{}'`.
             Gotcha: overlays are toggled via the `shell` target, not their id.
       - [ ] 14.2 the loop — runner (allowlist, payload log, tool-less opencode
             agent, transcript + state), triggered by the page; allowlist and
@@ -88,7 +88,7 @@ o.bind("SUPER + ALT + P", "Pomo toggle", "pomo toggle")
 o.bind("SUPER + ALT + N", "Pomo skip", "pomo skip")
 o.bind("SUPER + ALT + O", "Pomo popup", "omarchy-shell student.pomo toggle")
 o.bind("SUPER + ALT + D", "Deadlines popup", "omarchy-shell student.deadline toggle")
-o.bind("SUPER + ALT + J", "Page (today's note)", "omarchy-shell shell toggle student.page '{}'")
+o.bind("SUPER + ALT + equal", "Page (today's note)", "omarchy-shell shell toggle student.page '{}'")
 ```
 
 ## Decisions

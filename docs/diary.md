@@ -161,13 +161,22 @@ and the ledger; limits are decided from usage, not guessed.
   unchanged on every save. That mark becomes the reply-waiting marker.
 - Blocks painted from the state file: **faded** means seen, a **marker** means
   a reply is waiting. Keyboard navigation between blocks; a key dives in.
-- A bar glyph toggles the page with the mouse and carries the reply-waiting
-  state (the plugin declares both `overlay` and `bar-widget`). Ships with
-  the overlay phase.
-- **Pin mode** (after the overlay phase): the page as a normal Hyprland
-  window — tiled, floated, moved with the keys the student already has — not
-  a reserved-space dock. Same theme, focus, and save logic; only the window
-  type changes.
+- A bar glyph toggles the page with the mouse — the quick-add gesture — and
+  carries the reply-waiting state (the plugin declares both `overlay` and
+  `bar-widget`). Ships with the overlay phase.
+
+**Three shapes of one page.** Same sheet, same save logic, same block state;
+only the window and the panels around it differ.
+- **Overlay** — what exists now. `SUPER+ALT+=` (the plus key). Esc leaves.
+- **Alongside** — the sheet as a normal Hyprland window, tiled beside slides
+  or a PDF, moved with the keys the student already has. Not a reserved-space
+  dock. `SUPER+ALT+\` opens it directly; `Ctrl+P` inside the overlay pins it
+  into this shape. A pin icon in the header, as quiet as the agent light,
+  shows which shape you are in. Esc here drops focus, never closes. Ships
+  after the overlay phase.
+- **Homebase** — full screen: the sheet in the middle, panels around it (the
+  dialogue, open checkboxes, suggestions, deadlines, the timer). Grows one
+  panel per phase; its layout and key are decided once the panels exist.
 - Open-checkboxes panel: every unticked box across daily notes, last seven
   days open, older collapsed. Ticking there edits the original line (the page
   is the one writer). Merges with the deadlines popup once both exist: a task
@@ -241,5 +250,8 @@ and the ledger; limits are decided from usage, not guessed.
   in page only, dismissals remembered. No cost caps until usage is known.
   Syncthing and the Mac are out of the design. Phone and study mode later.
 - 2026-09-17, after the first build: template link collapsed to a header
-  mark; bar glyph joins phase 3; pin mode is a normal Hyprland window, not a
-  dock, because a side dock is legal layer-shell but not the Hyprland idiom.
+  mark; bar glyph joins phase 3. Three shapes of one page — overlay
+  (`SUPER+ALT+=`), alongside (`SUPER+ALT+\`, `Ctrl+P` to pin, a normal
+  Hyprland window because a side dock is legal layer-shell but not the
+  Hyprland idiom), homebase (full screen with panels, designed once the
+  panels exist).

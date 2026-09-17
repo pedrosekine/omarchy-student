@@ -201,10 +201,14 @@ only the window and the panels around it differ.
 - **Homebase** — full screen: the sheet in the middle, panels around it (the
   dialogue, open checkboxes, suggestions, deadlines, the timer). Grows one
   panel per phase; its layout and key are decided once the panels exist.
-- Open-checkboxes panel: every unticked box across daily notes, last seven
-  days open, older collapsed. Ticking there edits the original line (the page
-  is the one writer). Merges with the deadlines popup once both exist: a task
-  with a date and a task without one are the same thing to a student.
+- Open-checkboxes panel (`Ctrl+T`): every unticked box across daily notes,
+  last seven days open, older collapsed. Ticking there edits the original
+  line (the page is the one writer). Merges with the deadlines popup in the
+  homebase: a task with a date and a task without one are the same thing to
+  a student.
+- Proposals live in the margin under the reply. `Alt+Right` focuses them,
+  Enter accepts: local code runs the CLI and records the result; the model
+  never touches the store.
 - Suggestions panel: the day's suggestions with evidence, dismissable. Same
   "what's next" view as the checkboxes.
 - Class notes taken during the day go in their own files, linked from the

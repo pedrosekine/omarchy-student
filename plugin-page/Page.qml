@@ -32,7 +32,11 @@ import "Blocks.js" as Blocks
 // seen is veiled a little; a block with a reply carries a filled mark in
 // the gutter, accent until you have looked at it. The margin to the right
 // shows the reply for the block under the cursor. Alt+Right goes into the
-// chat about that block, ready to type; Alt+Left or Esc comes back.
+// margin: proposals first (Enter accepts one — local code runs the CLI, the
+// model never does), then the chat about that block; Alt+Left or Esc comes
+// back. Ctrl+T opens the tasks panel: every open checkbox across the daily
+// notes, last seven days open, older collapsed; Enter ticks one, in the
+// original note, because the page is the one program that edits notes.
 Item {
   id: root
 
@@ -75,9 +79,16 @@ Item {
   property var paint: []
   property var staged: ({})      // hash -> trigger, waiting for Ctrl+Enter
   property var ask: null         // { hash, trigger, yes } — the prompt after Enter
+  property int marginFocus: -1   // -1 note; 0..n-1 proposal rows; n = chat field
+  property bool tasksOpen: false
+  property var tasks: []
+  property bool showOlder: false
+  property int taskFocus: 0
   property string currentHash: ""
   readonly property var currentRecord: agent.record(currentHash)
   readonly property string currentStaged: staged[currentHash] || ""
+  readonly property var currentProposals: (currentRecord && currentRecord.proposals) ? currentRecord.proposals : []
+  readonly property var taskRows: root.buildTaskRows()
   readonly property bool replyWaiting: root.hasUnreadInNote()
 
   readonly property string problem: svc.configError || svc.error
@@ -157,7 +168,10 @@ Item {
   function hashNearLine(lineIndex) {
     var blocks = Blocks.split(editor.text)
     var k = Blocks.blockAt(blocks, lineIndex)
-    if (k < 0) for (var i = blocks.length - 1; i >= 0; i--) if (blocks[i].start <= lineIndex) { k = i; break }
+    // An item that is only its marker (what Enter leaves behind) is as good
+    // as a blank line: look up to the block that has words.
+    if (k >= 0 && /^\s*[-*+] (\[[ xX]\] )?$/.test(blocks[k].text)) k = -1
+    if (k < 0) for (var i = blocks.length - 1; i >= 0; i--) if (blocks[i].start <= lineIndex && !/^\s*[-*+] (\[[ xX]\] )?$/.test(blocks[i].text)) { k = i; break }
     return k < 0 ? "" : blocks[k].hash
   }
 
@@ -372,11 +386,102 @@ Item {
 
   function diveIn() {
     if (!root.currentRecord || root.marginWidth <= 0) return
-    chatField.forceActiveFocus()
+    if (root.currentProposals.length > 0) {
+      root.marginFocus = 0
+      marginKeys.forceActiveFocus()
+    } else {
+      root.marginFocus = root.currentProposals.length
+      chatField.forceActiveFocus()
+    }
   }
 
   function backToNote() {
+    root.marginFocus = -1
+    root.tasksOpen = false
     editor.forceActiveFocus()
+  }
+
+  function moveMarginFocus(d) {
+    var n = root.currentProposals.length
+    var next = Math.max(0, Math.min(n, root.marginFocus + d))
+    root.marginFocus = next
+    if (next === n) chatField.forceActiveFocus()
+    else marginKeys.forceActiveFocus()
+  }
+
+  function acceptProposal(i) {
+    var p = root.currentProposals[i]
+    if (!p || p.accepted || root.currentHash === "") return
+    acceptProc.command = [svc.runner, "accept", "--hash", root.currentHash, "--index", String(i)]
+    acceptProc.running = true
+  }
+
+  // ------------------------------------------------------------ tasks panel
+
+  function toggleTasks() {
+    root.tasksOpen = !root.tasksOpen
+    if (root.tasksOpen) {
+      root.taskFocus = 0
+      root.refreshTasks()
+      marginKeys.forceActiveFocus()
+    } else {
+      editor.forceActiveFocus()
+    }
+  }
+
+  function refreshTasks() {
+    tasksProc.command = [svc.runner, "tasks", "--days", "7"]
+    tasksProc.running = true
+  }
+
+  // Rows for the panel: a day header per date, its open tasks, and older
+  // days folded into one row until asked for.
+  function buildTaskRows() {
+    var rows = []
+    var older = 0
+    var lastDate = ""
+    for (var i = 0; i < root.tasks.length; i++) {
+      var t = root.tasks[i]
+      if (!t.recent && !root.showOlder) { older++; continue }
+      if (t.date !== lastDate) { rows.push({ kind: "day", date: t.date, recent: t.recent }); lastDate = t.date }
+      rows.push({ kind: "task", task: t })
+    }
+    if (older > 0) rows.push({ kind: "older", count: older })
+    return rows
+  }
+
+  function moveTaskFocus(d) {
+    var rows = root.taskRows
+    var i = root.taskFocus
+    do { i += d } while (i >= 0 && i < rows.length && rows[i].kind === "day")
+    if (i >= 0 && i < rows.length) root.taskFocus = i
+  }
+
+  function activateTask() {
+    var row = root.taskRows[root.taskFocus]
+    if (!row) return
+    if (row.kind === "older") { root.showOlder = true; return }
+    if (row.kind === "task") root.tickTask(row.task)
+  }
+
+  // Tick in the original note. Today's note is live in the editor; any
+  // other day is rewritten on disk, one line changed.
+  function tickTask(t) {
+    var re = new RegExp("^(\\s*[-*+] )\\[ \\] " + t.text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$", "m")
+    if (t.date === svc.noteDate) {
+      var text = editor.text
+      var m = re.exec(text)
+      if (!m) return
+      var pos = m.index + m[1].length + 1
+      editor.remove(pos, pos + 1)
+      editor.insert(pos, "x")
+      root.flush()
+      Qt.callLater(root.refreshTasks)
+      return
+    }
+    tickFile.pending = t
+    if (tickFile.path === t.file) tickFile.reload()
+    else tickFile.path = t.file
   }
 
   function sendChat() {
@@ -415,6 +520,46 @@ Item {
       agent.reload()
       root.launchQueued()
     }
+  }
+
+  Process {
+    id: acceptProc
+    stderr: StdioCollector { onStreamFinished: if (text.trim() !== "") console.warn("student.page accept: " + text.trim()) }
+    onExited: function (code, status) { agent.reload() }
+  }
+
+  Process {
+    id: tasksProc
+    stdout: StdioCollector {
+      onStreamFinished: {
+        try { root.tasks = JSON.parse(text) } catch (e) { root.tasks = [] }
+        root.taskFocus = Math.min(root.taskFocus, Math.max(0, root.taskRows.length - 1))
+      }
+    }
+  }
+
+  // One-line rewrite of another day's note when a task is ticked from
+  // the panel. Atomic, and only ever the line the student pointed at.
+  FileView {
+    id: tickFile
+    property var pending: null
+    atomicWrites: true
+    printErrors: false
+    onLoaded: {
+      var t = tickFile.pending
+      if (!t) return
+      tickFile.pending = null
+      var lines = text().split("\n")
+      if (t.line < lines.length) {
+        var re = new RegExp("^(\\s*[-*+] )\\[ \\] ")
+        if (re.test(lines[t.line])) {
+          lines[t.line] = lines[t.line].replace(re, "$1[x] ")
+          setText(lines.join("\n"))
+        }
+      }
+    }
+    onSaved: root.refreshTasks()
+    onLoadFailed: tickFile.pending = null
   }
 
   // Looking at a reply for a moment marks it read — nothing else needs to.
@@ -652,6 +797,9 @@ Item {
               } else if (event.key === Qt.Key_Right && alt) {
                 root.diveIn()
                 event.accepted = true
+              } else if (event.key === Qt.Key_T && ctrl) {
+                root.toggleTasks()
+                event.accepted = true
               }
             }
           }
@@ -682,7 +830,7 @@ Item {
     // and the field to talk back.
     BorderSurface {
       id: margin
-      visible: root.marginWidth > 0 && root.problem === "" && (!!root.currentRecord || root.currentStaged !== "" || !!root.ask || root.noSignHint)
+      visible: root.marginWidth > 0 && root.problem === "" && (root.tasksOpen || !!root.currentRecord || root.currentStaged !== "" || !!root.ask || root.noSignHint)
       anchors.left: sheet.right
       anchors.leftMargin: root.marginGap
       anchors.top: sheet.top
@@ -695,8 +843,116 @@ Item {
 
       MouseArea { anchors.fill: parent; onClicked: {} }
 
+      // Keyboard focus while in the margin (proposal rows or the tasks
+      // panel). The chat field has its own handling.
+      Item {
+        id: marginKeys
+        anchors.fill: parent
+        Keys.onPressed: function (event) {
+          var alt = event.modifiers & Qt.AltModifier
+          var k = event.key
+          if (k === Qt.Key_Escape || (k === Qt.Key_Left && alt)) { root.backToNote(); event.accepted = true; return }
+          if (root.tasksOpen) {
+            if (k === Qt.Key_Up) { root.moveTaskFocus(-1); event.accepted = true }
+            else if (k === Qt.Key_Down) { root.moveTaskFocus(1); event.accepted = true }
+            else if (k === Qt.Key_Return || k === Qt.Key_Enter || k === Qt.Key_Space) { root.activateTask(); event.accepted = true }
+            else if (k === Qt.Key_T && (event.modifiers & Qt.ControlModifier)) { root.toggleTasks(); event.accepted = true }
+            return
+          }
+          if (k === Qt.Key_Up) { root.moveMarginFocus(-1); event.accepted = true }
+          else if (k === Qt.Key_Down) { root.moveMarginFocus(1); event.accepted = true }
+          else if (k === Qt.Key_Return || k === Qt.Key_Enter || k === Qt.Key_Space) { root.acceptProposal(root.marginFocus); event.accepted = true }
+        }
+      }
+
+      // The tasks panel.
+      Flickable {
+        id: tasksFlick
+        visible: root.tasksOpen
+        anchors.fill: parent
+        anchors.topMargin: margin.contentTopInset + Style.space(4)
+        anchors.leftMargin: margin.contentLeftInset
+        anchors.rightMargin: margin.contentRightInset
+        anchors.bottomMargin: margin.contentBottomInset
+        clip: true
+        contentWidth: width
+        contentHeight: tasksColumn.implicitHeight
+        boundsBehavior: Flickable.StopAtBounds
+
+        Column {
+          id: tasksColumn
+          width: parent.width
+          spacing: Style.space(4)
+
+          Text {
+            width: parent.width
+            textFormat: Text.PlainText
+            text: "OPEN TASKS"
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          Text {
+            width: parent.width
+            visible: root.taskRows.length === 0
+            textFormat: Text.PlainText
+            text: "nothing open"
+            color: root.faint
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+          }
+
+          Repeater {
+            model: root.taskRows
+            Rectangle {
+              required property var modelData
+              required property int index
+              readonly property bool hot: root.taskFocus === index && modelData.kind !== "day"
+              width: tasksColumn.width
+              height: rowText.implicitHeight + (modelData.kind === "day" ? Style.space(12) : Style.space(8))
+              radius: Style.cornerRadius
+              color: hot ? Style.selectedFill : "transparent"
+              Text {
+                id: rowText
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.leftMargin: Style.space(6)
+                anchors.rightMargin: Style.space(6)
+                anchors.bottom: parent.bottom
+                anchors.bottomMargin: Style.space(4)
+                textFormat: Text.PlainText
+                wrapMode: Text.WordWrap
+                text: modelData.kind === "day" ? modelData.date
+                  : modelData.kind === "older" ? "+" + modelData.count + " older · Enter to show"
+                  : "○ " + modelData.task.text
+                color: modelData.kind === "day" ? root.dim : (modelData.kind === "older" ? root.faint : root.foreground)
+                font.family: root.fontFamily
+                font.pixelSize: modelData.kind === "day" ? Style.font.caption : Style.font.body
+              }
+              MouseArea {
+                anchors.fill: parent
+                enabled: modelData.kind !== "day"
+                onClicked: { root.taskFocus = index; root.activateTask() }
+              }
+            }
+          }
+
+          Text {
+            width: parent.width
+            textFormat: Text.PlainText
+            wrapMode: Text.WordWrap
+            text: "↑↓ move · Enter ticks · Esc back"
+            color: root.faint
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+        }
+      }
+
       Flickable {
         id: marginFlick
+        visible: !root.tasksOpen
         anchors.top: parent.top
         anchors.topMargin: margin.contentTopInset + Style.space(4)
         anchors.left: parent.left
@@ -801,19 +1057,40 @@ Item {
             font.pixelSize: Style.font.title
           }
 
+          // Proposals: what the agent would like to do, done only when the
+          // student says so. Enter on a row runs it through the CLI.
           Repeater {
-            model: root.currentRecord && root.currentRecord.proposals ? root.currentRecord.proposals : []
-            Text {
+            model: root.currentProposals
+            Rectangle {
               required property var modelData
+              required property int index
+              readonly property bool hot: root.marginFocus === index && marginKeys.activeFocus
+              readonly property bool done: !!modelData.accepted
               width: marginColumn.width
-              textFormat: Text.PlainText
-              wrapMode: Text.WordWrap
-              text: "○ " + (modelData.kind === "deadline"
-                ? "deadline: " + modelData.title + " — " + modelData.when + (modelData.subject ? " · " + modelData.subject : "")
-                : JSON.stringify(modelData))
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
+              height: propText.implicitHeight + Style.space(10)
+              radius: Style.cornerRadius
+              color: hot ? Style.selectedFill : "transparent"
+              border.width: hot ? 1 : 0
+              border.color: root.accent
+              Text {
+                id: propText
+                anchors.fill: parent
+                anchors.margins: Style.space(5)
+                textFormat: Text.PlainText
+                wrapMode: Text.WordWrap
+                text: (done ? "✓ " : "○ ") + (modelData.kind === "deadline"
+                  ? "deadline: " + modelData.title + " — " + modelData.when + (modelData.subject ? " · " + modelData.subject : "")
+                    + (done && modelData.accepted.id ? "  #" + modelData.accepted.id : "")
+                    + (modelData.error ? "  (failed: " + modelData.error + ")" : "")
+                  : JSON.stringify(modelData))
+                color: done ? root.dim : root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+              MouseArea {
+                anchors.fill: parent
+                onClicked: { root.marginFocus = index; root.acceptProposal(index) }
+              }
             }
           }
 
@@ -838,7 +1115,7 @@ Item {
             wrapMode: Text.WordWrap
             text: root.currentStaged !== ""
               ? "Ctrl+Enter sends this to the agent"
-              : "Alt+Right to talk about this"
+              : (root.currentProposals.length > 0 ? "Alt+Right: accept a proposal or talk about this" : "Alt+Right to talk about this")
             color: root.faint
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -848,6 +1125,7 @@ Item {
 
       Item {
         id: chatBox
+        visible: !root.tasksOpen
         anchors.left: parent.left
         anchors.leftMargin: margin.contentLeftInset
         anchors.right: parent.right
@@ -860,7 +1138,7 @@ Item {
           id: chatField
           anchors.left: parent.left
           anchors.right: parent.right
-          visible: !!root.currentRecord
+          visible: !!root.currentRecord && !root.tasksOpen
           placeholderText: "…"
           font.family: root.fontFamily
           font.pixelSize: Style.font.body
@@ -870,6 +1148,7 @@ Item {
           Keys.onEscapePressed: function (event) { event.accepted = true; root.backToNote() }
           Keys.onPressed: function (event) {
             if (event.key === Qt.Key_Left && (event.modifiers & Qt.AltModifier)) { root.backToNote(); event.accepted = true }
+            else if (event.key === Qt.Key_Up && text === "" && root.currentProposals.length > 0) { root.moveMarginFocus(-1); event.accepted = true }
           }
         }
       }

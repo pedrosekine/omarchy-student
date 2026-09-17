@@ -4,6 +4,8 @@
     student-agent run --trigger <kind> [--hash <block>] [--date YYYY.MM.DD]
     student-agent chat --hash <block> --message <text>         # dive in: continue that block's session
     student-agent ack --hash <block>                           # the student has seen the reply
+    student-agent accept --hash <block> --index <n>            # run a proposal through the CLI
+    student-agent tasks [--days 7]                             # open checkboxes across daily notes, JSON
     student-agent context --trigger <kind> [--hash <block>]   # payload only, no model
     student-agent state [--date YYYY.MM.DD]                    # today's state JSON
     student-agent install                                      # opencode agent def + dirs
@@ -494,6 +496,84 @@ def cmd_chat(cfg: dict, args) -> int:
     return 0
 
 
+def run_pomo(argv: list[str]) -> tuple[int, str]:
+    try:
+        r = subprocess.run(["pomo", *argv], capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return 1, str(e)
+    return r.returncode, (r.stdout + r.stderr).strip()
+
+
+def cmd_accept(cfg: dict, args) -> int:
+    """The student ticked a proposal: local code runs it, the model never does."""
+    date = dt.datetime.strptime(args.date, moment_to_strftime(cfg["daily"].get("format", "YYYY-MM-DD"))).date() \
+        if args.date else dt.date.today()
+    paths = Paths(cfg, date)
+    state = load_state(paths)
+    rec = state["blocks"].get(args.hash)
+    if not rec:
+        raise Fail(f"no record for block {args.hash}")
+    props = rec.get("proposals") or []
+    if not 0 <= args.index < len(props):
+        raise Fail(f"block {args.hash} has no proposal #{args.index}")
+    prop = props[args.index]
+    if prop.get("accepted"):
+        return 0
+    at = dt.datetime.now().isoformat(timespec="seconds")
+    if prop.get("kind") == "deadline":
+        argv = ["deadline", "add", str(prop.get("title") or "untitled")]
+        if prop.get("subject"):
+            argv += ["--subject", str(prop["subject"])]
+        if prop.get("link"):
+            argv += ["--link", str(prop["link"])]
+        argv += str(prop.get("when") or "").split() or ["today"]
+        code, out = run_pomo(argv)
+        if code != 0:
+            prop["error"] = out
+            write_atomic(paths, paths.state, json.dumps(state, indent=2, ensure_ascii=False) + "\n")
+            raise Fail(out or "pomo failed")
+        m = re.search(r"#(\d+)", out)
+        prop["accepted"] = {"at": at, "id": int(m.group(1)) if m else 0, "result": out}
+        prop.pop("error", None)
+        write_atomic(paths, paths.state, json.dumps(state, indent=2, ensure_ascii=False) + "\n")
+        append_text(paths, paths.transcript,
+                    f"\n- [x] accepted {dt.datetime.now().strftime('%H:%M')}: {out}\n")
+        print(out)
+        return 0
+    raise Fail(f"unknown proposal kind {prop.get('kind')!r}")
+
+
+CHECKBOX = re.compile(r"^(\s*[-*+] )\[ \] (.*\S)")
+
+
+def cmd_tasks(cfg: dict, args) -> int:
+    """Every unticked checkbox across the daily notes, newest day first.
+    Read-only; ticking is the page's job because the page is the one writer."""
+    fmt = moment_to_strftime(cfg["daily"].get("format", "YYYY-MM-DD"))
+    daily = Path(cfg["vault"]) / cfg["daily"]["dir"]
+    today = dt.date.today()
+    out = []
+    for f in sorted(daily.glob("*.md"), reverse=True):
+        try:
+            d = dt.datetime.strptime(f.stem, fmt).date()
+        except ValueError:
+            continue
+        age = (today - d).days
+        if age < 0:
+            continue
+        try:
+            lines = f.read_text().split("\n")
+        except OSError:
+            continue
+        for i, line in enumerate(lines):
+            m = CHECKBOX.match(line)
+            if m:
+                out.append({"date": f.stem, "file": str(f), "line": i, "text": m.group(2),
+                            "age": age, "recent": age < int(args.days)})
+    print(json.dumps(out, ensure_ascii=False))
+    return 0
+
+
 def cmd_ack(cfg: dict, args) -> int:
     date = dt.datetime.strptime(args.date, moment_to_strftime(cfg["daily"].get("format", "YYYY-MM-DD"))).date() \
         if args.date else dt.date.today()
@@ -542,13 +622,19 @@ def main(argv: list[str]) -> int:
     p = sub.add_parser("ack")
     p.add_argument("--hash", required=True)
     p.add_argument("--date", default="")
+    p = sub.add_parser("accept")
+    p.add_argument("--hash", required=True)
+    p.add_argument("--index", type=int, required=True)
+    p.add_argument("--date", default="")
+    p = sub.add_parser("tasks")
+    p.add_argument("--days", default="7")
     sub.add_parser("state").add_argument("--date", default="")
     sub.add_parser("install")
     args = ap.parse_args(argv)
     try:
         cfg = load_config()
-        return {"run": cmd_run, "chat": cmd_chat, "ack": cmd_ack, "context": cmd_context,
-                "state": cmd_state, "install": cmd_install}[args.cmd](cfg, args)
+        return {"run": cmd_run, "chat": cmd_chat, "ack": cmd_ack, "accept": cmd_accept, "tasks": cmd_tasks,
+                "context": cmd_context, "state": cmd_state, "install": cmd_install}[args.cmd](cfg, args)
     except Fail as e:
         print(f"student-agent: {e}", file=sys.stderr)
         return 2

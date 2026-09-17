@@ -109,7 +109,21 @@
             block's language by stopwords and states it in the payload,
             after a Dutch reply to an English note. Open-pass observations
             kept in state under `observations` for the suggestions panel.
-      - [ ] 14.4 proposals — tick to execute, conflict flag, open-checkboxes panel.
+      - [x] 14.4 proposals — the margin lists the agent's proposals under the
+            reply; `Alt+Right` focuses them (then the chat field), Enter
+            accepts one: `student-agent accept --hash --index` runs `pomo
+            deadline add` with title/subject/link/when, records the new id
+            in state and transcript, never twice. The prompt now flags
+            disagreements between the note and the deadline store (the
+            store is the truth). Tasks panel on `Ctrl+T`: `student-agent
+            tasks` lists every open checkbox across daily notes (read-only),
+            last seven days open, older folded; Enter ticks — today's note
+            in the editor, another day's file rewritten one line, atomic —
+            because the page is the one writer. Verified end to end: a
+            checkbox line → prompt → yes → proposal → Enter → deadline #5 in
+            the store (then removed). Gotcha: copying a QML file into the
+            plugins dir closes the running overlay even though the code is
+            not replaced; restart the shell instead.
       - [ ] 14.5 knowledge — profile/subjects/patterns, intention→outcome,
             suggestions with evidence, curriculum folder.
       - [ ] 14.6 rendering — headings, checkboxes, private callouts in the page.

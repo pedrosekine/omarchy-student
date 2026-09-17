@@ -43,8 +43,10 @@ margin to the right. Finishing a checkbox, `@`, or `?` line stages the block
 (hollow mark) and asks "Send this to the agent?" with *no* preselected; an
 arrow then Enter sends, `Ctrl+Enter` sends a staged block later. `Alt+Up/Down`
 move between blocks, `Ctrl+Up/Down` jump to a block's start or end,
-`Alt+Right` opens the chat about the current block, `Alt+Left` or `Esc` comes
-back. List your `languages` in the config; the agent answers in the one the
+`Alt+Right` goes into the margin — proposals first (Enter accepts one and runs
+it through `pomo`), then the chat — `Alt+Left` or `Esc` comes back. `Ctrl+T`
+opens the tasks panel: every open checkbox across your daily notes, Enter
+ticks one in its original note. List your `languages` in the config; the agent answers in the one the
 block is written in. Needs `~/.config/omarchy-student/config.json` (copy
 `config.example.json`) pointing at your vault; the note lives at
 `<vault>/<daily.dir>/<date>.md` exactly where Obsidian's daily notes would.

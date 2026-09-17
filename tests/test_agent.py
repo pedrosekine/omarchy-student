@@ -66,6 +66,11 @@ class T:
         stub = self.tmp / "bin" / "opencode"
         stub.write_text(STUB)
         stub.chmod(0o755)
+        pomo = self.tmp / "bin" / "pomo"
+        pomo.write_text("#!/usr/bin/env python3\nimport sys, os, json\n"
+                        "open(os.environ['STUB_DIR'] + '/pomo_args.json', 'w').write(json.dumps(sys.argv[1:]))\n"
+                        "print('report' in sys.argv and '{}' or 'pomo: deadline #7 · Fri 18 Sep 17:00 · one-pager · DORO')\n")
+        pomo.chmod(0o755)
         self.stub_dir = self.tmp / "stub"
         self.stub_dir.mkdir()
         self.state_home = self.tmp / "state"
@@ -177,7 +182,32 @@ def main() -> int:
         r = t.agent("ack", "--hash", at_block["hash"], "--date", "2026.09.17")
         check(r.returncode == 0 and json.loads(st.read_text())["blocks"][at_block["hash"]]["read"] is True, "ack marks read")
 
-        # 7. stray editor: hash of an edited block no longer matches → refused, no run
+        # 7. accept: the proposal runs through pomo, is recorded, never twice
+        r = t.agent("accept", "--hash", at_block["hash"], "--index", "0", "--date", "2026.09.17")
+        check(r.returncode == 0, f"accept exits 0 ({r.stderr.strip()})")
+        argv = json.loads((t.stub_dir / "pomo_args.json").read_text())
+        check(argv == ["deadline", "add", "one-pager", "--subject", "DORO", "friday"], f"pomo called with {argv}")
+        s = json.loads(st.read_text())
+        acc = s["blocks"][at_block["hash"]]["proposals"][0].get("accepted")
+        check(bool(acc) and acc["id"] == 7, "proposal recorded as accepted with the new id")
+        check("accepted" in tr.read_text() and "#7" in tr.read_text(), "acceptance in transcript")
+        (t.stub_dir / "pomo_args.json").unlink()
+        r = t.agent("accept", "--hash", at_block["hash"], "--index", "0", "--date", "2026.09.17")
+        check(r.returncode == 0 and not (t.stub_dir / "pomo_args.json").exists(), "second accept is a no-op")
+        r = t.agent("accept", "--hash", at_block["hash"], "--index", "5", "--date", "2026.09.17")
+        check(r.returncode != 0, "missing proposal index refused")
+        check(t.note.read_bytes() == before[0], "note untouched after accept")
+
+        # 8. tasks: open checkboxes across days, today recent, old collapsed
+        old = t.daily / "2026.08.01.md"
+        old.write_text("- [ ] ancient task\n- [x] done task\n")
+        r = t.agent("tasks")
+        tasks = json.loads(r.stdout)
+        check([x["text"] for x in tasks] == ["draft the one-pager by friday", "ancient task"], f"tasks listed newest first: {tasks}")
+        check(tasks[0]["recent"] is True and tasks[1]["recent"] is False, "recent flag by age")
+        check(tasks[0]["line"] == 7, "line index points at the checkbox line")
+
+        # 9. stray editor: hash of an edited block no longer matches → refused, no run
         t.note.write_text(NOTE)
         r = t.agent("run", "--trigger", "question", "--hash", "deadbeef", "--date", "2026.09.17")
         check(r.returncode != 0, "unknown block hash refused")

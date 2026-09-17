@@ -156,8 +156,18 @@ and the ledger; limits are decided from usage, not guessed.
 - Today's note only. No hierarchy, no file tree. A blank page.
 - Save after every keystroke, coalesced over ~300 ms, flushed on Enter and on
   close. Escape closes.
+- The template's link line never enters the editor: the page holds it apart,
+  shows a faded "agent" mark in the header, and writes the line back
+  unchanged on every save. That mark becomes the reply-waiting marker.
 - Blocks painted from the state file: **faded** means seen, a **marker** means
   a reply is waiting. Keyboard navigation between blocks; a key dives in.
+- A bar glyph toggles the page with the mouse and carries the reply-waiting
+  state (the plugin declares both `overlay` and `bar-widget`). Ships with
+  the overlay phase.
+- **Pin mode** (after the overlay phase): the page as a normal Hyprland
+  window — tiled, floated, moved with the keys the student already has — not
+  a reserved-space dock. Same theme, focus, and save logic; only the window
+  type changes.
 - Open-checkboxes panel: every unticked box across daily notes, last seven
   days open, older collapsed. Ticking there edits the original line (the page
   is the one writer). Merges with the deadlines popup once both exist: a task
@@ -230,3 +240,6 @@ and the ledger; limits are decided from usage, not guessed.
   boxes go to a panel, never to a question. Suggestions with evidence, shown
   in page only, dismissals remembered. No cost caps until usage is known.
   Syncthing and the Mac are out of the design. Phone and study mode later.
+- 2026-09-17, after the first build: template link collapsed to a header
+  mark; bar glyph joins phase 3; pin mode is a normal Hyprland window, not a
+  dock, because a side dock is legal layer-shell but not the Hyprland idiom.

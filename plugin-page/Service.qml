@@ -26,9 +26,17 @@ Item {
 
   // The note currently loaded. `text` mirrors disk after load and after
   // every save; the page compares against it to know if anything is pending.
+  //
+  // The note's first line, when it is the agent link the template put there,
+  // is held apart as `header` and never enters the editor: the page shows a
+  // mark for it and writes it back unchanged on every save. `body` is what
+  // the student sees and types. A note that does not start with the link has
+  // an empty header and the body is the whole file.
   property string notePath: ""
   property string noteDate: ""
   property string text: ""
+  property string header: ""
+  property string body: ""
   property bool ready: false
   property bool pending: false
   property bool saving: false
@@ -64,6 +72,18 @@ Item {
 
   // Obsidian template variables: {{date}}, {{date:FMT}}, {{title}}. Enough
   // for a one-line template; anything else passes through untouched.
+  // Split disk text into the page-owned header line and the student's body.
+  function splitHeader(t) {
+    var m = t.match(/^(\[\[[^\]\n]*\|agent\]\])\n?/)
+    if (!m) { root.header = ""; root.body = t; return }
+    root.header = m[1]
+    root.body = t.substring(m[0].length)
+  }
+
+  function joinHeader(bodyText) {
+    return root.header === "" ? bodyText : root.header + "\n" + bodyText
+  }
+
   function renderTemplate(raw, stamp) {
     var now = new Date()
     return raw
@@ -94,19 +114,22 @@ Item {
     else noteFile.path = p
   }
 
-  // Called by the page with its current text. No-ops when nothing changed
-  // since the last write, so a save per keystroke never touches disk twice.
-  function save(content) {
+  // Called by the page with the editor's text (the body). No-ops when nothing
+  // changed since the last write, so a save per keystroke never touches disk
+  // twice.
+  function save(bodyText) {
     if (!ready || error !== "") return
+    var content = root.joinHeader(bodyText)
     if (content === lastWritten) { root.pending = false; return }
     root.lastWritten = content
     root.text = content
+    root.body = bodyText
     root.saving = true
     noteFile.setText(content)
   }
 
-  function markPending(content) {
-    root.pending = content !== lastWritten
+  function markPending(bodyText) {
+    root.pending = root.joinHeader(bodyText) !== lastWritten
   }
 
   FileView {
@@ -149,6 +172,7 @@ Item {
       var external = root.ready
       root.lastWritten = t
       root.text = t
+      root.splitHeader(t)
       root.ready = true
       root.pending = false
       if (external) root.externalChange()
@@ -163,6 +187,7 @@ Item {
         var seed = raw ? root.renderTemplate(raw, root.noteDate) : ""
         root.lastWritten = seed
         root.text = seed
+        root.splitHeader(seed)
         root.ready = true
         root.pending = false
         if (seed !== "") noteFile.setText(seed)

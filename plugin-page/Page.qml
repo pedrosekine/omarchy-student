@@ -147,8 +147,8 @@ Item {
 
   Service {
     id: svc
-    onLoaded: root.applyText(svc.text)
-    onExternalChange: root.applyText(svc.text)
+    onLoaded: root.applyText(svc.body)
+    onExternalChange: root.applyText(svc.body)
   }
 
   Timer {
@@ -216,16 +216,34 @@ Item {
             font.pixelSize: Style.font.bodySmall
           }
 
-          // Saved / unsaved, as quietly as possible: a dot that brightens
-          // while a write is pending and settles once it landed.
-          Rectangle {
+          // Right side: the agent mark and the save dot. The mark stands in
+          // for the template's link line, which the service keeps out of the
+          // editor; it will carry the reply-waiting state once there is one.
+          Row {
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
-            width: Style.space(6)
-            height: width
-            radius: width / 2
-            color: root.problem !== "" ? root.urgent : (svc.pending || svc.saving ? root.foreground : root.faint)
-            Behavior on color { ColorAnimation { duration: 180 } }
+            spacing: Style.space(10)
+
+            Text {
+              visible: svc.header !== ""
+              anchors.verticalCenter: parent.verticalCenter
+              textFormat: Text.PlainText
+              text: "agent"
+              color: root.faint
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            // Saved / unsaved, as quietly as possible: a dot that brightens
+            // while a write is pending and settles once it landed.
+            Rectangle {
+              anchors.verticalCenter: parent.verticalCenter
+              width: Style.space(6)
+              height: width
+              radius: width / 2
+              color: root.problem !== "" ? root.urgent : (svc.pending || svc.saving ? root.foreground : root.faint)
+              Behavior on color { ColorAnimation { duration: 180 } }
+            }
           }
         }
 

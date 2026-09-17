@@ -90,6 +90,8 @@ Item {
   property bool tasksOpen: false
   property var tasks: []
   property var raised: []
+  property var tickHistory: []   // ticks made from the panel, newest last, for Ctrl+Z
+  property var contextFor: null  // task whose surrounding block is shown in the panel
   property bool showOlder: false
   property int taskFocus: 0
   property string currentHash: ""
@@ -262,6 +264,8 @@ Item {
       return true
     }
     if (k === Qt.Key_Escape) { root.dropAsk(); return true }
+    if (event.text === "y" || event.text === "Y") { root.send(root.ask.trigger, root.ask.hashes); return true }
+    if (event.text === "n" || event.text === "N") { root.dropAsk(); return true }
     if (k === Qt.Key_Return || k === Qt.Key_Enter) {
       if (root.ask.yes) { root.send(root.ask.trigger, root.ask.hashes); return true }
       root.dropAsk()
@@ -504,21 +508,69 @@ Item {
     if (i >= 0 && i < rows.length) root.taskFocus = i
   }
 
+  // Enter: go to the task. Today's note: the cursor lands on its line and
+  // the panel closes. Another day: its surrounding block unfolds under the
+  // row. Space or x ticks; Ctrl+Z takes the last tick back.
   function activateTask() {
     var row = root.taskRows[root.taskFocus]
     if (!row) return
     if (row.kind === "older") { root.showOlder = true; return }
-    if (row.kind === "task") root.tickTask(row.task)
+    if (row.kind === "task") root.goToTask(row.task)
     if (row.kind === "raised") {
       dismissProc.command = [svc.runner, "dismiss", "--date", row.item.date, "--kind", row.item.kind, "--index", String(row.item.index)]
       dismissProc.running = true
     }
   }
 
+  function tickFocused() {
+    var row = root.taskRows[root.taskFocus]
+    if (row && row.kind === "task") root.tickTask(row.task)
+  }
+
+  function goToTask(t) {
+    if (t.date === svc.noteDate) {
+      var m = root.taskRegex(t.text).exec(editor.text)
+      if (!m) return
+      root.backToNote()
+      editor.cursorPosition = m.index + m[0].length
+      return
+    }
+    root.contextFor = (root.contextFor && root.contextFor.file === t.file && root.contextFor.line === t.line) ? null : t
+    if (root.contextFor) {
+      contextFile.path = t.file
+      if (contextFile.path === t.file) contextFile.reload()
+    }
+  }
+
+  function taskRegex(text) {
+    return new RegExp("^(\\s*[-*+] )\\[ \\] " + text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$", "m")
+  }
+
+  function untickLast() {
+    if (root.tickHistory.length === 0) return
+    var t = root.tickHistory[root.tickHistory.length - 1]
+    root.tickHistory = root.tickHistory.slice(0, -1)
+    var re = new RegExp("^(\\s*[-*+] )\\[[xX]\\] " + t.text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$", "m")
+    if (t.date === svc.noteDate) {
+      var m = re.exec(editor.text)
+      if (!m) return
+      var pos = m.index + m[1].length + 1
+      editor.remove(pos, pos + 1)
+      editor.insert(pos, " ")
+      root.flush()
+      Qt.callLater(root.refreshTasks)
+      return
+    }
+    tickFile.pending = { task: t, untick: true }
+    if (tickFile.path === t.file) tickFile.reload()
+    else tickFile.path = t.file
+  }
+
   // Tick in the original note. Today's note is live in the editor; any
   // other day is rewritten on disk, one line changed.
   function tickTask(t) {
-    var re = new RegExp("^(\\s*[-*+] )\\[ \\] " + t.text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$", "m")
+    var re = root.taskRegex(t.text)
+    root.tickHistory = root.tickHistory.concat([t])
     if (t.date === svc.noteDate) {
       var text = editor.text
       var m = re.exec(text)
@@ -530,7 +582,7 @@ Item {
       Qt.callLater(root.refreshTasks)
       return
     }
-    tickFile.pending = t
+    tickFile.pending = { task: t, untick: false }
     if (tickFile.path === t.file) tickFile.reload()
     else tickFile.path = t.file
   }
@@ -606,20 +658,43 @@ Item {
     atomicWrites: true
     printErrors: false
     onLoaded: {
-      var t = tickFile.pending
-      if (!t) return
+      var p = tickFile.pending
+      if (!p) return
       tickFile.pending = null
+      var t = p.task
       var lines = text().split("\n")
       if (t.line < lines.length) {
-        var re = new RegExp("^(\\s*[-*+] )\\[ \\] ")
+        var re = p.untick ? new RegExp("^(\\s*[-*+] )\\[[xX]\\] ") : new RegExp("^(\\s*[-*+] )\\[ \\] ")
         if (re.test(lines[t.line])) {
-          lines[t.line] = lines[t.line].replace(re, "$1[x] ")
+          lines[t.line] = lines[t.line].replace(re, p.untick ? "$1[ ] " : "$1[x] ")
           setText(lines.join("\n"))
         }
       }
     }
     onSaved: root.refreshTasks()
     onLoadFailed: tickFile.pending = null
+  }
+
+  // Another day's note, read to show the block around a task in the panel.
+  FileView {
+    id: contextFile
+    property string snippet: ""
+    printErrors: false
+    onLoaded: {
+      var t = root.contextFor
+      if (!t) { contextFile.snippet = ""; return }
+      var blocks = Blocks.split(text())
+      var k = Blocks.blockAt(blocks, t.line)
+      var lo = k, hi = k
+      while (lo > 0 && blocks[lo - 1].kind === "item" && blocks[lo - 1].end === blocks[lo].start) lo--
+      while (hi < blocks.length - 1 && blocks[hi + 1].kind === "item" && blocks[hi + 1].start === blocks[hi].end) hi++
+      var parts = []
+      if (lo > 0) parts.push(blocks[lo - 1].text)
+      for (var i = Math.max(0, lo); i <= hi && i < blocks.length; i++) parts.push(blocks[i].text)
+      if (hi + 1 < blocks.length) parts.push(blocks[hi + 1].text)
+      contextFile.snippet = parts.join("\n\n")
+    }
+    onLoadFailed: contextFile.snippet = ""
   }
 
   // Looking at a reply for a moment marks it read — nothing else needs to.
@@ -893,8 +968,8 @@ Item {
             text: root.noSignHint
               ? "no sign for the agent on this block — start a line with @, make it a checkbox, or end it with ?"
               : (root.ask && root.ask.yes
-                ? "send to agent?  no   [yes]   · Enter sends"
-                : "send to agent?  [no]   yes   · → then Enter sends, Enter or Esc ignores")
+                ? "send to agent?  no   [yes]   · Enter or y sends"
+                : "send to agent?  [no]   yes   · y sends · n, Enter or Esc ignores")
             color: root.faint
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
@@ -950,10 +1025,13 @@ Item {
           var k = event.key
           if (k === Qt.Key_Escape || (k === Qt.Key_Left && alt)) { root.backToNote(); event.accepted = true; return }
           if (root.tasksOpen) {
+            var ctrl = event.modifiers & Qt.ControlModifier
             if (k === Qt.Key_Up) { root.moveTaskFocus(-1); event.accepted = true }
             else if (k === Qt.Key_Down) { root.moveTaskFocus(1); event.accepted = true }
-            else if (k === Qt.Key_Return || k === Qt.Key_Enter || k === Qt.Key_Space) { root.activateTask(); event.accepted = true }
-            else if (k === Qt.Key_T && (event.modifiers & Qt.ControlModifier)) { root.toggleTasks(); event.accepted = true }
+            else if (k === Qt.Key_Return || k === Qt.Key_Enter) { root.activateTask(); event.accepted = true }
+            else if (k === Qt.Key_Space || event.text === "x") { root.tickFocused(); event.accepted = true }
+            else if (k === Qt.Key_Z && ctrl) { root.untickLast(); event.accepted = true }
+            else if (k === Qt.Key_T && ctrl) { root.toggleTasks(); event.accepted = true }
             return
           }
           if (k === Qt.Key_Up) { root.moveMarginFocus(-1); event.accepted = true }
@@ -1051,11 +1129,23 @@ Item {
             }
           }
 
+          // The block around a task from another day, unfolded on Enter.
+          Text {
+            width: parent.width
+            visible: !!root.contextFor && contextFile.snippet !== ""
+            textFormat: Text.PlainText
+            wrapMode: Text.WordWrap
+            text: root.contextFor ? root.contextFor.date + "\n\n" + contextFile.snippet : ""
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+          }
+
           Text {
             width: parent.width
             textFormat: Text.PlainText
             wrapMode: Text.WordWrap
-            text: "↑↓ move · Enter ticks a task, waves off a suggestion · Esc back"
+            text: "↑↓ move · Enter goes to it · Space ticks · Ctrl+Z unticks · Esc back"
             color: root.faint
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption

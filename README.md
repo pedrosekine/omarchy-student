@@ -47,7 +47,8 @@ move between blocks, `Ctrl+Up/Down` jump to a block's start or end,
 `Alt+Right` goes into the margin — proposals first (Enter accepts one and runs
 it through `pomo`), then the chat — `Alt+Left` or `Esc` comes back. `Ctrl+T`
 opens the what's-next panel: every open checkbox across your daily notes and
-what the agent has raised, Enter ticks a task or waves off a suggestion. Drop
+what the agent has raised. Enter goes to a task or waves off a suggestion,
+Space ticks, Ctrl+Z unticks. Drop
 course material into `agents/student/curriculum/` and run
 `student-agent curriculum` once for PDFs. List your `languages` in the config; the agent answers in the one the
 block is written in. Needs `~/.config/omarchy-student/config.json` (copy

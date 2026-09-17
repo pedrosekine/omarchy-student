@@ -113,8 +113,9 @@ things must both be true for a block to reach the model: it carries a
 - The signs: a checkbox line (`- [ ] …`), a line starting with `@`, a line
   ending with `?`, a tick. Finishing an `@` or `?` line with Enter
   **stages** the block — hollow accent mark in the gutter — and shows a
-  washed prompt under the cursor, "send to agent? [no] yes". Enter again or
-  Esc ignores it and the page behaves as usual; an arrow then Enter sends.
+  washed prompt under the cursor, "send to agent? [no] yes". `y` sends;
+  `n`, Enter again, or Esc ignores it and the page behaves as usual; an
+  arrow then Enter sends.
 - **A checkbox list is one submission.** Enter on an item just gives the
   next bullet. Leaving the list (Enter on an empty bullet) stages the whole
   run of adjacent items as a group with one prompt; the reply attaches to
@@ -217,8 +218,10 @@ only the window and the panels around it differ.
   dialogue, open checkboxes, suggestions, deadlines, the timer). Grows one
   panel per phase; its layout and key are decided once the panels exist.
 - Open-checkboxes panel (`Ctrl+T`): every unticked box across daily notes,
-  last seven days open, older collapsed. Ticking there edits the original
-  line (the page is the one writer). Merges with the deadlines popup in the
+  last seven days open, older collapsed. Enter goes to the task (today: the
+  cursor lands on its line; another day: its surrounding block unfolds in
+  the panel). Space ticks, Ctrl+Z takes the last tick back; both edit the
+  original line (the page is the one writer). Merges with the deadlines popup in the
   homebase: a task with a date and a task without one are the same thing to
   a student.
 - Proposals live in the margin under the reply. `Alt+Right` focuses them,

@@ -46,8 +46,10 @@ submission when you leave it. `Ctrl+Enter` sends a staged block later. `Alt+Up/D
 move between blocks, `Ctrl+Up/Down` jump to a block's start or end,
 `Alt+Right` goes into the margin — proposals first (Enter accepts one and runs
 it through `pomo`), then the chat — `Alt+Left` or `Esc` comes back. `Ctrl+T`
-opens the tasks panel: every open checkbox across your daily notes, Enter
-ticks one in its original note. List your `languages` in the config; the agent answers in the one the
+opens the what's-next panel: every open checkbox across your daily notes and
+what the agent has raised, Enter ticks a task or waves off a suggestion. Drop
+course material into `agents/student/curriculum/` and run
+`student-agent curriculum` once for PDFs. List your `languages` in the config; the agent answers in the one the
 block is written in. Needs `~/.config/omarchy-student/config.json` (copy
 `config.example.json`) pointing at your vault; the note lives at
 `<vault>/<daily.dir>/<date>.md` exactly where Obsidian's daily notes would.

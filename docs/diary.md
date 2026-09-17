@@ -78,8 +78,12 @@ suggestions. Not pretty; the page renders it.
 
 **Knowledge, three kinds only.** `profile.md` (who the student is, courses,
 how they want to be spoken to); `subjects/<name>.md` (deliverables, what is
-going on, dismissed suggestions); `patterns.md` (intention→outcome record,
-observed habits). A file whose purpose the agent cannot state does not exist.
+going on); `patterns.md` (intention→outcome record, observed habits — the
+runner computes the facts from the notes' checkboxes and puts them in the
+payload; the model writes what they show). A file whose purpose the agent
+cannot state does not exist. One exception, system-owned:
+`knowledge/dismissed.md`, written by the runner when the student waves a
+suggestion off, read by the model, never written by it.
 
 **Curriculum.** Student-provided course material. PDFs are converted to
 markdown once on arrival by local code, so payloads are always text and always
@@ -161,8 +165,9 @@ The model never touches the store.
 
 **Suggestions.** Found during any run: upcoming tasks, late tasks with a
 deadline, recently added tasks without one, opportunities in the curriculum.
-Evidence attached. Shown in the page only, never as a notification. Dismissal
-is written to knowledge.
+Evidence attached. Shown in the page only (`Ctrl+T`, under the open tasks),
+never as a notification. Near-duplicates are folded by content-word overlap.
+Dismissal is written to `knowledge/dismissed.md` and hides every variant.
 
 **Dive-in.** A plain chat about one block, continuing that block's opencode
 session (`--session`), persisted into the same transcript section. May produce

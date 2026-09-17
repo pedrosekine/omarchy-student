@@ -223,7 +223,30 @@ def main() -> int:
         check(tasks[0]["recent"] is True and tasks[1]["recent"] is False, "recent flag by age")
         check(tasks[0]["line"] == 7, "line index points at the checkbox line")
 
-        # 10. stray editor: hash of an edited block no longer matches → refused, no run
+        # 10. what's next, dismissals remembered, suggestions deduped
+        r = t.agent("next")
+        nx = json.loads(r.stdout)
+        check(any(x["kind"] == "suggestion" and x["text"] == "book a slot" for x in nx["raised"]), "suggestion listed in next")
+        sug = next(x for x in nx["raised"] if x["kind"] == "suggestion")
+        r = t.agent("dismiss", "--date", sug["date"], "--kind", "suggestion", "--index", str(sug["index"]))
+        check(r.returncode == 0, f"dismiss exits 0 ({r.stderr.strip()})")
+        dm = t.vault / "agents/student/knowledge/dismissed.md"
+        check(dm.exists() and "book a slot" in dm.read_text(), "dismissal written to dismissed.md")
+        nx = json.loads(t.agent("next").stdout)
+        check(not any(x["text"] == "book a slot" for x in nx["raised"]), "dismissed suggestion gone from next")
+        r = t.agent("context", "--trigger", "open", "--date", "2026.09.17")
+        check("Intentions and outcomes" in r.stdout and "draft the one-pager by friday" in r.stdout, "outcomes in payload")
+        check("dismissed (do not raise again" in r.stdout and "book a slot" in r.stdout, "dismissed list in payload")
+        t.set_reply(reply="", suggestions=[{"text": "Book a slot!", "evidence": "x"}, {"text": "new idea", "evidence": "y"}])
+        r = t.agent("run", "--trigger", "mention", "--hash", at_block["hash"], "--date", "2026.09.17")
+        s = json.loads(st.read_text())
+        texts = [x["text"] for x in s["suggestions"]]
+        check(texts.count("book a slot") == 1 and "Book a slot!" not in texts and "new idea" in texts, f"dismissed suggestion not re-added: {texts}")
+        t.set_reply(reply="", knowledge=[{"file": "dismissed.md", "content": "wiped"}])
+        r = t.agent("run", "--trigger", "mention", "--hash", at_block["hash"], "--date", "2026.09.17")
+        check("book a slot" in dm.read_text(), "model cannot overwrite dismissed.md")
+
+        # 11. stray editor: hash of an edited block no longer matches → refused, no run
         t.note.write_text(NOTE)
         r = t.agent("run", "--trigger", "question", "--hash", "deadbeef", "--date", "2026.09.17")
         check(r.returncode != 0, "unknown block hash refused")

@@ -37,10 +37,12 @@ import "Blocks.js" as Blocks
 // screen until asked: Alt+Right opens the margin for the block under the
 // cursor — the reply, its proposals (Enter accepts one; local code runs the
 // CLI, the model never does), and the chat about that block; Alt+Left or
-// Esc closes it again. Ctrl+T opens the tasks panel in the same place:
-// every open checkbox across the daily notes, last seven days open, older
-// collapsed; Enter ticks one, in the original note, because the page is
-// the one program that edits notes.
+// Esc closes it again. Ctrl+T opens the what's-next panel in the same
+// place: every open checkbox across the daily notes (last seven days open,
+// older collapsed; Enter ticks one, in the original note, because the page
+// is the one program that edits notes) and, below, what the agent has
+// raised — suggestions with their evidence, observations from open passes
+// — where Enter waves one off and the runner remembers that.
 Item {
   id: root
 
@@ -87,6 +89,7 @@ Item {
   property int marginFocus: -1   // -1 note; 0..n-1 proposal rows; n = chat field
   property bool tasksOpen: false
   property var tasks: []
+  property var raised: []
   property bool showOlder: false
   property int taskFocus: 0
   property string currentHash: ""
@@ -470,7 +473,7 @@ Item {
   }
 
   function refreshTasks() {
-    tasksProc.command = [svc.runner, "tasks", "--days", "7"]
+    tasksProc.command = [svc.runner, "next", "--days", "7"]
     tasksProc.running = true
   }
 
@@ -487,6 +490,10 @@ Item {
       rows.push({ kind: "task", task: t })
     }
     if (older > 0) rows.push({ kind: "older", count: older })
+    if (root.raised.length > 0) {
+      rows.push({ kind: "day", date: "FROM THE AGENT", recent: true })
+      for (var j = 0; j < root.raised.length; j++) rows.push({ kind: "raised", item: root.raised[j] })
+    }
     return rows
   }
 
@@ -502,6 +509,10 @@ Item {
     if (!row) return
     if (row.kind === "older") { root.showOlder = true; return }
     if (row.kind === "task") root.tickTask(row.task)
+    if (row.kind === "raised") {
+      dismissProc.command = [svc.runner, "dismiss", "--date", row.item.date, "--kind", row.item.kind, "--index", String(row.item.index)]
+      dismissProc.running = true
+    }
   }
 
   // Tick in the original note. Today's note is live in the editor; any
@@ -572,10 +583,19 @@ Item {
     id: tasksProc
     stdout: StdioCollector {
       onStreamFinished: {
-        try { root.tasks = JSON.parse(text) } catch (e) { root.tasks = [] }
+        try {
+          var nx = JSON.parse(text)
+          root.tasks = nx.tasks || []
+          root.raised = nx.raised || []
+        } catch (e) { root.tasks = []; root.raised = [] }
         root.taskFocus = Math.min(root.taskFocus, Math.max(0, root.taskRows.length - 1))
       }
     }
+  }
+
+  Process {
+    id: dismissProc
+    onExited: function (code, status) { root.refreshTasks(); agent.reload() }
   }
 
   // One-line rewrite of another day's note when a task is ticked from
@@ -826,10 +846,16 @@ Item {
                 editor.insert(editor.cursorPosition, "\t")
                 event.accepted = true
               } else if (event.text === "]") {
-                // "- []" is what fingers type; "- [ ] " is what markdown wants.
+                // "- []" or a bare "[]" at the start of a line is what
+                // fingers type; "- [ ] " is what markdown wants.
                 var lb = root.lineBounds(editor.cursorPosition)
-                if (/^\s*[-*+] \[$/.test(editor.text.substring(lb.start, editor.cursorPosition))) {
+                var before = editor.text.substring(lb.start, editor.cursorPosition)
+                if (/^\s*[-*+] \[$/.test(before)) {
                   editor.insert(editor.cursorPosition, " ] ")
+                  event.accepted = true
+                } else if (/^\s*\[$/.test(before)) {
+                  editor.remove(lb.start, editor.cursorPosition)
+                  editor.insert(lb.start, before.replace("[", "- [ ] "))
                   event.accepted = true
                 }
               } else if (event.key === Qt.Key_Up && alt) {
@@ -950,6 +976,19 @@ Item {
         contentHeight: tasksColumn.implicitHeight
         boundsBehavior: Flickable.StopAtBounds
 
+        // Keep the focused row in view.
+        function revealFocused() {
+          var kids = tasksColumn.children
+          for (var i = 0; i < kids.length; i++) {
+            var k = kids[i]
+            if (k.index === undefined || k.index !== root.taskFocus) continue
+            if (contentY > k.y) contentY = k.y
+            else if (contentY + height < k.y + k.height) contentY = k.y + k.height - height
+            return
+          }
+        }
+        Connections { target: root; function onTaskFocusChanged() { Qt.callLater(tasksFlick.revealFocused) } }
+
         Column {
           id: tasksColumn
           width: parent.width
@@ -958,7 +997,7 @@ Item {
           Text {
             width: parent.width
             textFormat: Text.PlainText
-            text: "OPEN TASKS"
+            text: "WHAT'S NEXT"
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -996,7 +1035,10 @@ Item {
                 wrapMode: Text.WordWrap
                 text: modelData.kind === "day" ? modelData.date
                   : modelData.kind === "older" ? "+" + modelData.count + " older · Enter to show"
-                  : "○ " + modelData.task.text
+                  : modelData.kind === "raised"
+                    ? (modelData.item.kind === "suggestion" ? "◇ " : "· ") + modelData.item.text
+                      + (modelData.item.evidence ? "\n   " + modelData.item.evidence : "")
+                    : "○ " + modelData.task.text
                 color: modelData.kind === "day" ? root.dim : (modelData.kind === "older" ? root.faint : root.foreground)
                 font.family: root.fontFamily
                 font.pixelSize: modelData.kind === "day" ? Style.font.caption : Style.font.body
@@ -1013,7 +1055,7 @@ Item {
             width: parent.width
             textFormat: Text.PlainText
             wrapMode: Text.WordWrap
-            text: "↑↓ move · Enter ticks · Esc back"
+            text: "↑↓ move · Enter ticks a task, waves off a suggestion · Esc back"
             color: root.faint
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption

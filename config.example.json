@@ -11,5 +11,6 @@
     "German",
     "Portuguese",
     "Spanish"
-  ]
+  ],
+  "curriculum": "agents/student/curriculum"
 }

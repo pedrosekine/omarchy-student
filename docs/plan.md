@@ -129,8 +129,22 @@
             `group`); the margin is on-demand only (`Alt+Right`/`Ctrl+T`);
             the send prompt is a washed line under the cursor; `- []`
             autocorrects to `- [ ] `.
-      - [ ] 14.5 knowledge — profile/subjects/patterns, intention→outcome,
-            suggestions with evidence, curriculum folder.
+      - [x] 14.5 knowledge — the payload now carries an "Intentions and
+            outcomes" section computed locally from the last 14 days of
+            checkboxes (done vs open, per day), so `patterns.md` rests on
+            facts; the prompt says what each knowledge file is for.
+            Suggestions: deduplicated by content-word overlap against the
+            day's list and against `knowledge/dismissed.md`, a file the
+            runner writes and the model may only read; the payload lists
+            dismissals as "do not raise again". `student-agent next` lists
+            open tasks plus undismissed suggestions and open-pass
+            observations across the last 7 days; the `Ctrl+T` panel is now
+            "what's next": tasks on top, "from the agent" below, Enter ticks
+            a task or waves off a suggestion. `curriculum` folder in config
+            (`agents/student/curriculum`); `student-agent curriculum`
+            converts PDFs to markdown once with pdftotext; `.md` files there
+            are always in the payload. `- []` and a bare `[]` at line start
+            become `- [ ] `.
       - [ ] 14.6 rendering — headings, checkboxes, private callouts in the page.
       - [ ] 14.7 focus mode · 14.8 study mode · 14.9 phone capture, external reading.
 - [ ] Parked — deadline entry from the popup (absorbed by 14.4), `.ics` import,

@@ -6,6 +6,9 @@
     student-agent ack --hash <block>                           # the student has seen the reply
     student-agent accept --hash <block> --index <n>            # run a proposal through the CLI
     student-agent tasks [--days 7]                             # open checkboxes across daily notes, JSON
+    student-agent next [--days 7]                              # tasks + open suggestions/observations, JSON
+    student-agent dismiss --date D --kind suggestion|observation --index <n>
+    student-agent curriculum                                   # convert PDFs in the curriculum folder to .md
     student-agent context --trigger <kind> [--hash <block>]   # payload only, no model
     student-agent state [--date YYYY.MM.DD]                    # today's state JSON
     student-agent install                                      # opencode agent def + dirs
@@ -81,6 +84,10 @@ class Paths:
         self.transcript = self.agent_dir / "daily" / f"{self.stamp}.md"
         self.state = self.agent_dir / "daily" / f"{self.stamp}.json"
         self.knowledge = self.agent_dir / "knowledge"
+        # System-owned memory of the student's decisions: the one file under
+        # knowledge/ the model never writes. It reads it, so a dismissed
+        # suggestion stays dismissed.
+        self.dismissed = self.agent_dir / "knowledge" / "dismissed.md"
         self.curriculum = (self.vault / cfg["curriculum"]) if cfg.get("curriculum") else None
         self.payloads = STATE_HOME / "payloads"
         self.ledger = STATE_HOME / "cost.tsv"
@@ -210,6 +217,89 @@ def language_line(cfg: dict, sample: str = "") -> str:
     return line
 
 
+CHECKBOX_ANY = re.compile(r"^\s*[-*+] \[([ xX])\] (.*\S)")
+
+
+def outcomes(cfg: dict, days: int = 14) -> list[dict]:
+    """Intention → outcome, computed here, never guessed: every checkbox in
+    the last `days` daily notes with whether it was ticked."""
+    fmt = moment_to_strftime(cfg["daily"].get("format", "YYYY-MM-DD"))
+    daily = Path(cfg["vault"]) / cfg["daily"]["dir"]
+    today = dt.date.today()
+    out = []
+    for f in sorted(daily.glob("*.md"), reverse=True):
+        try:
+            d = dt.datetime.strptime(f.stem, fmt).date()
+        except ValueError:
+            continue
+        age = (today - d).days
+        if age < 0 or age >= days:
+            continue
+        try:
+            lines = f.read_text().split("\n")
+        except OSError:
+            continue
+        for i, line in enumerate(lines):
+            m = CHECKBOX_ANY.match(line)
+            if m:
+                out.append({"date": f.stem, "file": str(f), "line": i, "text": m.group(2),
+                            "done": m.group(1) != " ", "age": age})
+    return out
+
+
+def outcomes_section(cfg: dict) -> list[str]:
+    rows = outcomes(cfg)
+    if not rows:
+        return ["(no checkboxes in the last 14 days)"]
+    parts = []
+    by_day: dict[str, list[dict]] = {}
+    for r in rows:
+        by_day.setdefault(r["date"], []).append(r)
+    for day, items in by_day.items():
+        done = [i["text"] for i in items if i["done"]]
+        open_ = [i["text"] for i in items if not i["done"]]
+        parts.append(f"{day}: {len(done)} done, {len(open_)} open")
+        for t in done:
+            parts.append(f"  ✓ {t}")
+        for t in open_:
+            parts.append(f"  ○ {t}")
+    return parts
+
+
+def read_dismissed(paths: Paths) -> list[str]:
+    try:
+        return [l[2:].strip() for l in paths.dismissed.read_text().split("\n") if l.startswith("- ")]
+    except FileNotFoundError:
+        return []
+
+
+def norm(text: str) -> str:
+    return re.sub(r"\W+", " ", text.lower()).strip()
+
+
+FILLER = {"the", "and", "or", "is", "are", "was", "be", "it", "its", "a", "an", "on", "in", "as", "so", "that", "this",
+          "with", "for", "of", "to", "at", "by", "if", "not", "now", "still", "yet", "whether", "which", "what", "into",
+          "from", "one", "your", "you", "can", "will", "has", "have", "needs", "need", "means", "counts", "count",
+          "ask", "check", "find", "out", "confirm", "add", "enter", "list", "entry", "task", "tasks", "note", "there",
+          "der", "die", "das", "und", "ist", "ein", "eine", "o", "a", "e", "que", "el", "la", "y", "es", "de", "um", "uma"}
+
+
+def words(text: str) -> set[str]:
+    return {w for w in norm(text).split() if len(w) > 1 and w not in FILLER}
+
+
+def similar(a: str, b: str) -> bool:
+    """Same suggestion in other words: the content words mostly coincide."""
+    wa, wb = words(a), words(b)
+    if not wa or not wb:
+        return norm(a) == norm(b)
+    return len(wa & wb) / min(len(wa), len(wb)) >= 0.5
+
+
+def is_known(text: str, known: list[str]) -> bool:
+    return any(similar(text, k) for k in known)
+
+
 def build_payload(paths: Paths, trigger: str, fired: list[dict], visible: list[dict], cfg: dict | None = None) -> str:
     sample = "\n".join(b["text"] for b in fired) if fired else "\n".join(b["text"] for b in visible[-3:])
     parts = ["# Language", language_line(cfg or {}, sample), "", "# Trigger", f"kind: {trigger}"]
@@ -234,6 +324,14 @@ def build_payload(paths: Paths, trigger: str, fired: list[dict], visible: list[d
         parts += ["", "# Curriculum (student-provided, read-only)", ""]
         for name, text in curriculum:
             parts += [f"## {name}", "", text.rstrip(), ""]
+
+    parts += ["", "# Intentions and outcomes (last 14 days, computed from the notes)", ""]
+    parts += outcomes_section(cfg or {})
+
+    dismissed = read_dismissed(paths)
+    if dismissed:
+        parts += ["", "# Suggestions the student has dismissed (do not raise again unless the evidence changed)", ""]
+        parts += [f"- {d}" for d in dismissed]
 
     report = pomo_report()
     parts += ["", "# Timer and deadlines (pomo report --json)", "", report or "(unavailable)"]
@@ -361,13 +459,18 @@ def apply(cfg: dict, paths: Paths, trigger: str, fired: list[dict], visible: lis
     elif reply["reply"]:
         state.setdefault("observations", []).append({"text": reply["reply"], "at": at, "trigger": trigger,
                                                      "session": result["session"], "read": False})
+    known = read_dismissed(paths) + [x.get("text", "") for x in state["suggestions"]]
     for s in reply["suggestions"]:
-        state["suggestions"].append({"text": str(s.get("text") or ""), "evidence": str(s.get("evidence") or ""),
+        text = str(s.get("text") or "").strip()
+        if not text or is_known(text, known):
+            continue
+        known.append(text)
+        state["suggestions"].append({"text": text, "evidence": str(s.get("evidence") or ""),
                                      "block": hash_, "at": at, "dismissed": False})
     written = []
     for k in reply["knowledge"]:
         name = str(k.get("file") or "")
-        if not KNOWLEDGE_FILE.match(name):
+        if not KNOWLEDGE_FILE.match(name) or name == "dismissed.md":
             continue
         write_atomic(paths, paths.knowledge / name, str(k.get("content") or "").rstrip() + "\n")
         written.append(name)
@@ -591,6 +694,92 @@ def cmd_tasks(cfg: dict, args) -> int:
     return 0
 
 
+def state_days(cfg: dict, days: int) -> list[tuple[str, Paths, dict]]:
+    out = []
+    for back in range(days):
+        d = dt.date.today() - dt.timedelta(days=back)
+        p = Paths(cfg, d)
+        if p.state.exists():
+            out.append((p.stamp, p, load_state(p)))
+    return out
+
+
+def cmd_next(cfg: dict, args) -> int:
+    """What's next: open tasks plus what the agent has raised and the
+    student has not yet dealt with, across the last days."""
+    tasks = [r for r in outcomes(cfg, days=3650) if not r["done"]]
+    for r in tasks:
+        r["recent"] = r["age"] < int(args.days)
+    raised = []
+    days = state_days(cfg, int(args.days))
+    dismissed = read_dismissed(days[0][1]) if days else []
+    seen: list[str] = []
+    for stamp, p, st in days:
+        for i, sg in enumerate(st.get("suggestions", [])):
+            text = sg.get("text", "")
+            if sg.get("dismissed") or is_known(text, dismissed) or is_known(text, seen):
+                continue
+            seen.append(text)
+            raised.append({"date": stamp, "kind": "suggestion", "index": i, "text": text,
+                           "evidence": sg.get("evidence", ""), "at": sg.get("at", "")})
+        for i, ob in enumerate(st.get("observations", [])):
+            if not ob.get("dismissed") and not ob.get("read"):
+                raised.append({"date": stamp, "kind": "observation", "index": i, "text": ob.get("text", ""),
+                               "evidence": "", "at": ob.get("at", "")})
+    print(json.dumps({"tasks": tasks, "raised": raised}, ensure_ascii=False))
+    return 0
+
+
+def cmd_dismiss(cfg: dict, args) -> int:
+    """The student waved a suggestion off. Remembered in a file the model
+    reads and never writes, so it stays waved off."""
+    date = dt.datetime.strptime(args.date, moment_to_strftime(cfg["daily"].get("format", "YYYY-MM-DD"))).date()
+    paths = Paths(cfg, date)
+    state = load_state(paths)
+    key = "suggestions" if args.kind == "suggestion" else "observations"
+    items = state.get(key, [])
+    if not 0 <= args.index < len(items):
+        raise Fail(f"no {args.kind} #{args.index} on {paths.stamp}")
+    item = items[args.index]
+    if item.get("dismissed"):
+        return 0
+    item["dismissed"] = True
+    item["read"] = True
+    write_atomic(paths, paths.state, json.dumps(state, indent=2, ensure_ascii=False) + "\n")
+    if args.kind == "suggestion":
+        if not paths.dismissed.exists():
+            append_text(paths, paths.dismissed, "# Dismissed suggestions\n\nWritten by the runner when the student "
+                        "waves a suggestion off. The agent reads this and does not raise these again.\n\n")
+        append_text(paths, paths.dismissed, f"- {item.get('text', '')}  ({paths.stamp})\n")
+    return 0
+
+
+def cmd_curriculum(cfg: dict, args) -> int:
+    """Student-provided material: PDFs become markdown once, next to the
+    original, so payloads are always text and always logged."""
+    paths = Paths(cfg, dt.date.today())
+    if paths.curriculum is None:
+        raise Fail("no curriculum folder in config")
+    paths.curriculum.mkdir(parents=True, exist_ok=True)
+    n = 0
+    for pdf in sorted(paths.curriculum.rglob("*.pdf")):
+        md = pdf.with_suffix(".md")
+        if md.exists() and md.stat().st_mtime >= pdf.stat().st_mtime:
+            continue
+        try:
+            r = subprocess.run(["pdftotext", "-layout", str(pdf), "-"], capture_output=True, text=True, timeout=120)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            print(f"skip {pdf.name}: {e}", file=sys.stderr)
+            continue
+        if r.returncode != 0:
+            print(f"skip {pdf.name}: {r.stderr.strip()[-200:]}", file=sys.stderr)
+            continue
+        write_atomic(paths, md, f"# {pdf.stem}\n\n(converted from {pdf.name})\n\n" + r.stdout)
+        n += 1
+    print(f"{n} converted · folder {paths.curriculum}")
+    return 0
+
+
 def cmd_ack(cfg: dict, args) -> int:
     date = dt.datetime.strptime(args.date, moment_to_strftime(cfg["daily"].get("format", "YYYY-MM-DD"))).date() \
         if args.date else dt.date.today()
@@ -621,8 +810,9 @@ def cmd_install(cfg: dict, args) -> int:
     dst.parent.mkdir(parents=True, exist_ok=True)
     dst.write_text(src.read_text())
     paths = Paths(cfg, dt.date.today())
-    for d in (paths.agent_dir / "daily", paths.knowledge, paths.payloads, paths.cwd):
-        d.mkdir(parents=True, exist_ok=True)
+    for d in (paths.agent_dir / "daily", paths.knowledge, paths.payloads, paths.cwd, paths.curriculum):
+        if d is not None:
+            d.mkdir(parents=True, exist_ok=True)
     print(f"agent definition → {dst}\nagent folder → {paths.agent_dir}\npayload log → {paths.payloads}")
     return 0
 
@@ -648,12 +838,20 @@ def main(argv: list[str]) -> int:
     p.add_argument("--date", default="")
     p = sub.add_parser("tasks")
     p.add_argument("--days", default="7")
+    p = sub.add_parser("next")
+    p.add_argument("--days", default="7")
+    p = sub.add_parser("dismiss")
+    p.add_argument("--date", required=True)
+    p.add_argument("--kind", required=True, choices=("suggestion", "observation"))
+    p.add_argument("--index", type=int, required=True)
+    sub.add_parser("curriculum")
     sub.add_parser("state").add_argument("--date", default="")
     sub.add_parser("install")
     args = ap.parse_args(argv)
     try:
         cfg = load_config()
         return {"run": cmd_run, "chat": cmd_chat, "ack": cmd_ack, "accept": cmd_accept, "tasks": cmd_tasks,
+                "next": cmd_next, "dismiss": cmd_dismiss, "curriculum": cmd_curriculum,
                 "context": cmd_context, "state": cmd_state, "install": cmd_install}[args.cmd](cfg, args)
     except Fail as e:
         print(f"student-agent: {e}", file=sys.stderr)

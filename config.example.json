@@ -6,5 +6,10 @@
     "template": "agents/student/templates/daily"
   },
   "agentDir": "agents/student",
-  "language": "English"
+  "languages": [
+    "English",
+    "German",
+    "Portuguese",
+    "Spanish"
+  ]
 }

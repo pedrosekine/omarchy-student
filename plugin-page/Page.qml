@@ -17,14 +17,16 @@ import "Blocks.js" as Blocks
 // item (checkboxes reset to unticked), Enter on an empty item leaves the
 // list, Tab indents. Alt+Up/Down jump between blocks — the same block
 // splitting the agent uses, so the navigation unit and the reply unit are
-// one thing.
+// one thing; Ctrl+Up/Down go to the start and end of the current block.
 //
-// The page is also the trigger, but never by accident. Finishing a checkbox
-// line, an `@` line, or a line ending in `?` (Enter), or ticking a box,
-// *stages* the block: a hollow mark appears in the gutter and nothing is
-// sent. Ctrl+Enter sends the block under the cursor to `student-agent` —
-// staged or not — after the save has landed on disk. Opening the page runs
-// one automatic pass so answers are waiting when you come back.
+// The page is also the trigger, but never by accident. A block reaches the
+// agent only when it carries a sign for it — a checkbox, an `@`, a `?` —
+// and the student says so. Finishing such a line with Enter *stages* the
+// block (hollow gutter mark) and offers a small prompt in the margin that
+// defaults to no: Enter again or Esc ignores it, an arrow then Enter sends.
+// Ctrl+Enter sends the staged block under the cursor at any later moment.
+// A block without a sign never goes. Opening the page runs one automatic
+// pass so answers are waiting when you come back.
 //
 // The agent's answers are painted, never inserted: a block the agent has
 // seen is veiled a little; a block with a reply carries a filled mark in
@@ -72,6 +74,7 @@ Item {
   // What is painted and what the margin shows.
   property var paint: []
   property var staged: ({})      // hash -> trigger, waiting for Ctrl+Enter
+  property var ask: null         // { hash, trigger, yes } — the prompt after Enter
   property string currentHash: ""
   readonly property var currentRecord: agent.record(currentHash)
   readonly property string currentStaged: staged[currentHash] || ""
@@ -181,14 +184,60 @@ Item {
     root.staged = next
   }
 
-  // Ctrl+Enter: send the block under the cursor. The trigger is whatever
-  // rule the block meets, or a plain mention when it meets none.
+  // Ctrl+Enter: send the block under the cursor, if it carries a sign for
+  // the agent. A block without one stays where it is; the margin says why.
+  property bool noSignHint: false
   function sendCurrent() {
     var hash = root.currentHash
     if (hash === "") return
-    var trigger = root.staged[hash] || root.triggerForBlock(hash) || "mention"
+    var trigger = root.staged[hash] || root.triggerForBlock(hash)
+    if (!trigger) { root.noSignHint = true; hintTimer.restart(); return }
+    root.send(trigger, hash)
+  }
+
+  function send(trigger, hash) {
+    root.ask = null
     root.unstage(hash)
     root.requestRun(trigger, hash)
+  }
+
+  function askAbout(trigger, hash) {
+    if (hash === "") return
+    root.ask = { hash: hash, trigger: trigger, yes: false }
+  }
+
+  function dropAsk() { root.ask = null }
+
+  // Keys while the prompt is up. Returns true when the key was consumed.
+  function askKey(event) {
+    if (!root.ask) return false
+    var k = event.key
+    if (k === Qt.Key_Left || k === Qt.Key_Right || k === Qt.Key_Up || k === Qt.Key_Down || k === Qt.Key_Tab) {
+      root.ask = { hash: root.ask.hash, trigger: root.ask.trigger, yes: !root.ask.yes }
+      return true
+    }
+    if (k === Qt.Key_Escape) { root.dropAsk(); return true }
+    if (k === Qt.Key_Return || k === Qt.Key_Enter) {
+      if (root.ask.yes) { root.send(root.ask.trigger, root.ask.hash); return true }
+      root.dropAsk()
+      return false   // a plain Enter: let it fall through and behave as usual
+    }
+    root.dropAsk()   // anything else: the prompt just goes away
+    return false
+  }
+
+  function blockBounds(hash) {
+    var blocks = Blocks.split(editor.text)
+    for (var i = 0; i < blocks.length; i++) if (blocks[i].hash === hash) return blocks[i]
+    return null
+  }
+
+  // Ctrl+Up / Ctrl+Down: start / end of the current block.
+  function jumpWithinBlock(direction) {
+    var b = root.blockBounds(root.currentHash)
+    if (!b) return
+    if (direction < 0) editor.cursorPosition = root.positionOfLine(b.start)
+    else editor.cursorPosition = Math.max(0, root.positionOfLine(b.end) - 1)
   }
 
   function triggerForBlock(hash) {
@@ -314,7 +363,11 @@ Item {
       else if (m[4]) marker = (parseInt(m[4], 10) + 1) + m[5] + " "
       editor.insert(pos, "\n" + m[1] + marker)
     }
-    if (trigger !== "") root.stage(trigger, root.hashOfLine(lineIndex))
+    if (trigger !== "") {
+      var hash = root.hashOfLine(lineIndex)
+      root.stage(trigger, hash)
+      root.askAbout(trigger, hash)
+    }
   }
 
   function diveIn() {
@@ -383,6 +436,12 @@ Item {
     id: saveTimer
     interval: 300
     onTriggered: root.flush()
+  }
+
+  Timer {
+    id: hintTimer
+    interval: 2500
+    onTriggered: root.noSignHint = false
   }
 
   // ------------------------------------------------------------ window
@@ -565,6 +624,7 @@ Item {
             Keys.onPressed: function (event) {
               var ctrl = event.modifiers & Qt.ControlModifier
               var alt = event.modifiers & Qt.AltModifier
+              if (root.askKey(event)) { event.accepted = true; return }
               if (event.key === Qt.Key_Escape) {
                 root.dismiss()
                 event.accepted = true
@@ -582,6 +642,12 @@ Item {
                 event.accepted = true
               } else if (event.key === Qt.Key_Down && alt) {
                 root.jumpBlock(1)
+                event.accepted = true
+              } else if (event.key === Qt.Key_Up && ctrl) {
+                root.jumpWithinBlock(-1)
+                event.accepted = true
+              } else if (event.key === Qt.Key_Down && ctrl) {
+                root.jumpWithinBlock(1)
                 event.accepted = true
               } else if (event.key === Qt.Key_Right && alt) {
                 root.diveIn()
@@ -616,7 +682,7 @@ Item {
     // and the field to talk back.
     BorderSurface {
       id: margin
-      visible: root.marginWidth > 0 && root.problem === "" && (!!root.currentRecord || root.currentStaged !== "")
+      visible: root.marginWidth > 0 && root.problem === "" && (!!root.currentRecord || root.currentStaged !== "" || !!root.ask || root.noSignHint)
       anchors.left: sheet.right
       anchors.leftMargin: root.marginGap
       anchors.top: sheet.top
@@ -648,6 +714,71 @@ Item {
           id: marginColumn
           width: parent.width
           spacing: Style.space(12)
+
+          // The gentle prompt after Enter on a line with a sign. Defaults
+          // to no; an arrow flips it, Enter confirms, Esc or typing ignores.
+          Column {
+            width: parent.width
+            visible: !!root.ask
+            spacing: Style.space(6)
+
+            Text {
+              width: parent.width
+              textFormat: Text.PlainText
+              wrapMode: Text.WordWrap
+              text: "Send this to the agent?"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            Row {
+              spacing: Style.space(8)
+              Repeater {
+                model: [{ label: "no", yes: false }, { label: "yes", yes: true }]
+                Rectangle {
+                  required property var modelData
+                  readonly property bool hot: !!root.ask && root.ask.yes === modelData.yes
+                  width: optLabel.implicitWidth + Style.space(16)
+                  height: optLabel.implicitHeight + Style.space(8)
+                  radius: Style.cornerRadius
+                  color: hot ? Style.selectedFill : "transparent"
+                  border.width: 1
+                  border.color: hot ? root.accent : root.faint
+                  Text {
+                    id: optLabel
+                    anchors.centerIn: parent
+                    textFormat: Text.PlainText
+                    text: modelData.label
+                    color: hot ? root.foreground : root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                  }
+                }
+              }
+            }
+
+            Text {
+              width: parent.width
+              textFormat: Text.PlainText
+              wrapMode: Text.WordWrap
+              text: "→ then Enter sends · Enter or Esc ignores"
+              color: root.faint
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+          }
+
+          Text {
+            width: parent.width
+            visible: root.noSignHint
+            textFormat: Text.PlainText
+            wrapMode: Text.WordWrap
+            text: "This block has no sign for the agent. Start a line with @, make it a checkbox, or end it with ?"
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+          }
 
           Text {
             width: parent.width
@@ -702,12 +833,12 @@ Item {
 
           Text {
             width: parent.width
-            visible: !chatField.activeFocus && (root.currentStaged !== "" || !!(root.currentRecord && root.currentRecord.state === "reply"))
+            visible: !root.ask && !chatField.activeFocus && (root.currentStaged !== "" || !!(root.currentRecord && root.currentRecord.state === "reply"))
             textFormat: Text.PlainText
             wrapMode: Text.WordWrap
             text: root.currentStaged !== ""
               ? "Ctrl+Enter sends this to the agent"
-              : "Alt+Right to talk about this · Ctrl+Enter to ask again"
+              : "Alt+Right to talk about this"
             color: root.faint
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption

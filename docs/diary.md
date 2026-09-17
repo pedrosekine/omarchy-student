@@ -103,22 +103,29 @@ hides the day. Both are removed by local code before the payload is built.
 
 ## The loop
 
-**Triggers, all from the page, never by accident.** No file watcher.
-- Finishing a line that meets a rule — a checkbox line (`- [ ] …`), a line
-  starting with `@`, a line ending with `?` — or ticking a box **stages**
-  the block: a hollow accent mark in the gutter, nothing sent.
-- `Ctrl+Enter` sends the block under the cursor, staged or not (a block that
-  meets no rule goes as a plain mention). This is the only way a block
-  reaches the model.
+**Triggers, all from the page, never by accident.** No file watcher. Two
+things must both be true for a block to reach the model: it carries a
+**sign** for the agent, and the student **says so**.
+- The signs: a checkbox line (`- [ ] …`), a line starting with `@`, a line
+  ending with `?`, a tick. Finishing such a line with Enter **stages** the
+  block — hollow accent mark in the gutter — and shows a small prompt in the
+  margin, "Send this to the agent?", with *no* preselected. Enter again or
+  Esc ignores it and the page behaves as usual; an arrow then Enter sends.
+- `Ctrl+Enter` sends the staged block under the cursor at any later moment.
+  On a block without a sign it sends nothing and the margin says why.
 - Opening the page runs one automatic pass (skipped when nothing is new), so
   answers are waiting when the student comes back. Its observations have no
   block; they are kept in the state file for the suggestions panel.
 - Decided 2026-09-17 after the first day of use: automatic sends on Enter
-  fired on ordinary journaling questions, so the staging step went in.
+  fired on ordinary journaling questions; the sign + confirmation pair is
+  the safety mechanism.
 
-**Language.** `language` in the config, sent as an explicit instruction at
-the top of every payload. A small model asked to "use the student's
-language" answered in Dutch to an English note; explicit beats inferred.
+**Language.** `languages` in the config, first is the default. The runner
+detects which of them the triggering block is written in (a stopword check,
+no dependencies) and states it as a fact at the top of the payload: "the
+student wrote this in German, answer in German; never any language outside
+the list". A small model asked to "use the student's language" answered in
+Dutch to an English note; told beats inferred.
 
 **Run.** The page saves the note and calls the runner with the block that
 fired. The runner:
@@ -171,9 +178,10 @@ and the ledger; limits are decided from usage, not guessed.
   unchanged on every save. That mark becomes the reply-waiting marker.
 - Blocks painted from the state file: **faded** means seen, a **filled
   mark** means a reply (accent until read), a **hollow mark** means staged.
-  `Alt+Up/Down` move between blocks, `Alt+Right` goes into the chat about
-  the current block ready to type, `Alt+Left` or `Esc` comes back,
-  `Ctrl+Enter` sends.
+  `Alt+Up/Down` move between blocks, `Ctrl+Up/Down` go to the start and
+  end of the current block, `Alt+Right` goes into the chat about the
+  current block ready to type, `Alt+Left` or `Esc` comes back, `Ctrl+Enter`
+  sends a staged block.
 - A block is a paragraph (consecutive lines, blank line ends it), a
   top-level list item with its indented children, a heading, or a callout.
   Two lines with no blank between them are one block.

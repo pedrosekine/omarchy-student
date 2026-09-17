@@ -101,10 +101,14 @@
             page is keepLoaded, so QML changes need `omarchy restart shell`,
             not just a copy. Revised the same afternoon: Enter/tick only
             *stage* a block (hollow mark), `Ctrl+Enter` sends; keys moved to
-            `Alt+Up/Down` (blocks), `Alt+Right` (chat), `Alt+Left`/Esc
-            (back); `language` in config travels in every payload after a
-            Dutch reply to an English note; open-pass observations kept in
-            state under `observations` for the suggestions panel.
+            `Alt+Up/Down` (blocks), `Ctrl+Up/Down` (block start/end),
+            `Alt+Right` (chat), `Alt+Left`/Esc (back). Then once more: Enter
+            on a signed line stages *and* asks in the margin with *no*
+            preselected (arrow + Enter sends); `Ctrl+Enter` sends only a
+            signed block. `languages` list in config; the runner detects the
+            block's language by stopwords and states it in the payload,
+            after a Dutch reply to an English note. Open-pass observations
+            kept in state under `observations` for the suggestions panel.
       - [ ] 14.4 proposals — tick to execute, conflict flag, open-checkboxes panel.
       - [ ] 14.5 knowledge — profile/subjects/patterns, intention→outcome,
             suggestions with evidence, curriculum folder.

@@ -156,12 +156,61 @@ def load_state(paths: Paths) -> dict:
         return {"date": paths.stamp, "blocks": {}, "suggestions": [], "runs": []}
 
 
-def language_line(cfg: dict) -> str:
-    return f"Always answer in {cfg.get('language') or 'English'}, whatever language the note is in."
+# Stopwords that tell the student's languages apart. Only the languages in
+# the config are candidates; the first is the default when a block is too
+# short or too ambiguous to tell. The model is then *told* the language, so
+# it never has to guess — a guess is how an English note got a Dutch reply.
+STOPWORDS = {
+    "English": {"the", "and", "is", "are", "to", "of", "in", "on", "what", "this", "that", "with", "for", "it",
+                "was", "have", "has", "not", "do", "did", "does", "my", "you", "i", "we", "about", "week", "how"},
+    "German": {"der", "die", "das", "und", "ist", "sind", "nicht", "ich", "du", "wir", "mit", "für", "auf", "ein",
+               "eine", "wie", "was", "habe", "hat", "haben", "noch", "auch", "diese", "dieser", "über", "zu", "im"},
+    "Portuguese": {"o", "a", "os", "as", "e", "é", "são", "não", "eu", "você", "nós", "com", "para", "um", "uma",
+                   "que", "como", "tenho", "tem", "esta", "este", "sobre", "semana", "mais", "muito", "isso", "está"},
+    "Spanish": {"el", "la", "los", "las", "y", "es", "son", "no", "yo", "tú", "nosotros", "con", "para", "un", "una",
+                "que", "cómo", "tengo", "tiene", "esta", "este", "sobre", "semana", "más", "muy", "esto", "está"},
+    "Dutch": {"de", "het", "een", "en", "is", "zijn", "niet", "ik", "je", "wij", "met", "voor", "op", "wat", "hoe",
+              "heb", "heeft", "hebben", "nog", "ook", "deze", "over", "naar", "van"},
+    "French": {"le", "la", "les", "et", "est", "sont", "pas", "je", "tu", "nous", "avec", "pour", "un", "une",
+               "que", "comment", "ai", "a", "avons", "cette", "sur", "semaine", "plus", "très", "dans", "du"},
+    "Italian": {"il", "la", "gli", "le", "e", "è", "sono", "non", "io", "tu", "noi", "con", "per", "un", "una",
+                "che", "come", "ho", "ha", "abbiamo", "questa", "questo", "sulla", "settimana", "più", "molto"},
+}
+
+
+def languages(cfg: dict) -> list[str]:
+    ls = cfg.get("languages")
+    if isinstance(ls, list) and ls:
+        return [str(x) for x in ls]
+    return [str(cfg.get("language") or "English")]
+
+
+def detect_language(text: str, candidates: list[str]) -> str:
+    words = re.findall(r"[\w']+", text.lower())
+    best, best_n = candidates[0], 0
+    for lang in candidates:
+        sw = STOPWORDS.get(lang)
+        if not sw:
+            continue
+        n = sum(1 for w in words if w in sw)
+        if n > best_n:
+            best, best_n = lang, n
+    return best if best_n >= 2 else candidates[0]
+
+
+def language_line(cfg: dict, sample: str = "") -> str:
+    ls = languages(cfg)
+    chosen = detect_language(sample, ls) if sample else ls[0]
+    others = ", ".join(l for l in ls if l != chosen)
+    line = f"The student wrote this in {chosen}. Answer in {chosen}."
+    if others:
+        line += f" The student also uses {others}; never answer in any other language than these."
+    return line
 
 
 def build_payload(paths: Paths, trigger: str, block: dict | None, visible: list[dict], cfg: dict | None = None) -> str:
-    parts = ["# Language", language_line(cfg or {}), "", "# Trigger", f"kind: {trigger}"]
+    sample = block["text"] if block is not None else "\n".join(b["text"] for b in visible[-3:])
+    parts = ["# Language", language_line(cfg or {}, sample), "", "# Trigger", f"kind: {trigger}"]
     if block is not None:
         parts.append(f"block: {block['hash']}")
         parts.append("")
@@ -423,7 +472,7 @@ def cmd_chat(cfg: dict, args) -> int:
     if session:
         # The session already holds the context and the first reply; only the
         # student's words travel. Logged all the same.
-        payload = (f"{language_line(cfg)}\n\nThe student replies about block {args.hash}:\n\n{message}\n\n"
+        payload = (f"{language_line(cfg, message)}\n\nThe student replies about block {args.hash}:\n\n{message}\n\n"
                    "Answer with the same JSON contract.\n")
         payload_file.write_text(payload)
         result = run_model(cfg, paths, "", session=session, message=payload)

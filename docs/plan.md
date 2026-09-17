@@ -1,11 +1,13 @@
 # Plan — omarchy-student
 
-## Architecture: Hybrid
-- `cli/` — single-source timer core (bash/python first, Rust later if needed)
-  - state file: `~/.local/state/omarchy-student/state.json`
-  - commands: start, pause, resume, toggle, reset, skip, status
-- `plugin/` — thin Omarchy bar widget (v0.2+) that calls `pomo status`
-  - `manifest.json`, `BarWidget.qml`, `Service.qml`
+## Architecture
+- `cli/` — single-source timer + deadline core (bash, no deps)
+  - state in `~/.local/state/omarchy-student/` (`state.json`, `deadlines.tsv`, `pomo.log`)
+  - commands: start, pause, resume, toggle, reset, skip, status, stats, deadline, report
+- `plugin/`, `plugin-deadline/` — thin Omarchy bar widgets that read the state files
+- `page/` (next) — Quickshell full-screen panel: today's note, blank page, the trigger
+- `agent/` (next) — the runner: allowlist context builder, payload log, tool-less
+  opencode agent, transcript + state file. Reference: `docs/diary.md`
 
 ## Steps (one at a time)
 - [x] Step 1 — folder + README + this plan
@@ -45,12 +47,21 @@
       and sink to the bottom. `SUPER+ALT+D` summons it. Gotcha: the shell's
       plugin hot-reload keeps the old compiled component, so after copying
       QML into `~/.config/omarchy/plugins/` run `omarchy restart shell`.
-- [ ] Later — deadline entry from the popup, `.ics` import for whoever *does*
-      have a working feed, analytics (`history`), daily counter
-- [ ] Step 14 — the diary: today's note is the capture surface, a local watcher
-      triggers a cloud agent that replies inline, consent is per block. Timer and
-      deadlines become features inside this surface. End-to-end plan with phases
-      and open questions: `docs/todo-capture.md`
+- [ ] Step 14 — the diary. Reference plan with files, loop, page, tests and
+      phases: `docs/diary.md`. Phases, each shippable alone:
+      - [ ] 14.1 the page — Quickshell panel, today's note, plain text,
+            per-keystroke save, Hypr key, theme-bound, block splitting. No agent.
+      - [ ] 14.2 the loop — runner (allowlist, payload log, tool-less opencode
+            agent, transcript + state), triggered by the page; allowlist and
+            no-write tests; `subject`/`link` on deadlines; `--for` on sessions.
+      - [ ] 14.3 the overlay — seen/reply states, block navigation, dive-in chat.
+      - [ ] 14.4 proposals — tick to execute, conflict flag, open-checkboxes panel.
+      - [ ] 14.5 knowledge — profile/subjects/patterns, intention→outcome,
+            suggestions with evidence, curriculum folder.
+      - [ ] 14.6 rendering — headings, checkboxes, private callouts in the page.
+      - [ ] 14.7 focus mode · 14.8 study mode · 14.9 phone capture, external reading.
+- [ ] Parked — deadline entry from the popup (absorbed by 14.4), `.ics` import,
+      analytics (`history`), daily counter
 
 ## v0.1 Keyboard contract
 ```bash
@@ -92,11 +103,19 @@ Longer-form design thinking lives in `docs/student-os.md` (agentic-first, cadenc
   1); Tailscale on a phone is not free (~9%/day typical, known spikes); and
   GitHub can't push to a sleeping laptop, so the laptop pulls on a timer.
   Priority vocabulary is must/should/could — consequence, not date. Full
-  reasoning in `docs/todo-capture.md`.
+  reasoning in the git history of `docs/todo-capture.md` (deleted 2026-09-17;
+  phone capture is now phase 14.9 and GitHub is no longer assumed at all).
 - 2026-09-16: The plan pivots. Daily note, not a todo app: the agent reads and
-  answers in the note, and consent is per block, enforced by local code that
-  logs every payload before inference. The agent may see drafts and essays but
-  produces nothing submittable. The loop runs on the laptop only — one device
-  must be enough, and a second always-awake machine would mean two writers over
-  file sync. Cloud model through opencode; the surface comes after the loop.
-  Details and phases in `docs/todo-capture.md`.
+  answers, consent is per block, enforced by local code that logs every payload
+  before inference. The agent may see drafts and essays but produces nothing
+  submittable. The loop runs on the laptop only.
+- 2026-09-17: Full design review, all branches settled; `docs/diary.md` is the
+  reference. Headlines: own editor in the shell (blank page, Omarchy theme), and
+  it comes *before* the loop; the agent never writes the note — the page is the
+  only writer and also the only trigger (checkbox, `@`, `?`, tick, page open —
+  never a schedule); the model has no tools and returns one structured message
+  that local code applies; context is an allowlist, so `human/` is simply not
+  on it; store wins over note; project = subject, milestones = deadlines;
+  unticked boxes go to a panel, never to a question; suggestions carry evidence
+  and dismissals are remembered; no cost caps until usage is known. Syncthing,
+  the Mac, and the phone are out of the design for now.

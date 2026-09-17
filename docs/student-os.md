@@ -1,8 +1,9 @@
 # Student OS — design notes
 
-**Status:** reflection phase, started 2026-09-08. Not an implementation plan.
-Each decision is tagged **decided**, **leaning**, or **open**. Nothing here is
-built until it moves to a numbered step in `plan.md`.
+**Status:** reflection phase, started 2026-09-08. Superseded on 2026-09-17 by
+`docs/diary.md`, which resolves every open item below (see the addendum at the
+end). Kept for the research and the reasoning; where the two disagree, `diary.md`
+wins.
 
 The pomodoro became a deadline tracker. This document is about what it becomes
 next: a small "student OS" inside Omarchy that an agent can read, reason over,
@@ -188,3 +189,25 @@ pomo report --json                                   # everything, one call
 4. Does the agent ever read a linked note? Under what explicit consent?
 5. What is the minimum viable "notice absence" list for the skill file?
 6. How do we measure whether the system is becoming less needed?
+
+## Addendum 2026-09-17 — how `diary.md` resolved the open items
+
+- D2 · the lever: deadlines get a `link` field. The agent does **not** follow
+  it; linked notes are read only when an `@` line in the daily note points at
+  them. Portal deep links are phase 14.9.
+- D3 · friction: the post-session keystroke is **dropped**. A checkbox line in
+  the note is the intention; the tick is the outcome.
+- D5 · cadence: no evening prompt, no Sunday review, nothing on a schedule.
+  The agent runs only when the student acts in the page (signals: checkbox,
+  `@`, `?`, tick, page open) and may be proactive inside that moment.
+- D6 · agent interface: still a skill-shaped prompt, but the model has no
+  tools; it returns one structured message that local code applies.
+- D7 · session target: `--for <deadline id>`, optional. Absence is never
+  evidence — group work goes unlogged.
+- Principle 3 ("never sees the essay") is replaced by an allowlist with
+  per-block private callouts; the agent may read what is on the list and
+  produces nothing submittable.
+- Open questions 1–6: (1) dropped; (2) nothing until asked; (3) summoned only;
+  (4) only via an `@` line; (5) upcoming tasks, late tasks with a deadline,
+  recent tasks without one, curriculum opportunities — each with evidence;
+  (6) commitments met and self-initiated sessions, plus dismissals that stick.

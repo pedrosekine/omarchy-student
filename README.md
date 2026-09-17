@@ -1,7 +1,8 @@
 # omarchy-student
 
-Hybrid Pomodoro for Omarchy Quattro: CLI that works in terminal + thin bar display.
-Keyboard-first v0.1.
+Hybrid Pomodoro and deadline tracker for Omarchy: CLI that works in terminal +
+thin bar widgets. Keyboard-first v0.1. Next: a diary page in the shell that an
+agent reads and answers — reference plan in `docs/diary.md`.
 
 ## Why hybrid?
 

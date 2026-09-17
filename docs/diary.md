@@ -1,0 +1,232 @@
+# The diary — reference plan
+
+**Status:** decided 2026-09-17 after a full design review. This is the
+reference for building. Supersedes `todo-capture.md` (deleted) and the
+"agent side" sketches in `student-os.md`, whose open questions are resolved
+here. Nothing below is built yet unless a phase is ticked in `plan.md`.
+
+## What it is
+
+A blank page inside the Omarchy shell where a student writes the day, and an
+agent that reads it and answers in the margin. Sessions and deadlines are
+features inside that page. The shipped timer and deadline work is the
+structured layer underneath.
+
+Built for one student first, installable by others later. Hard dependencies:
+Omarchy and opencode. The student brings one model key. Every path (vault,
+daily folder, curriculum folder, agent folder) lives in one config file, never
+in code, and the vault path is never recorded in this public repo.
+
+## Principles
+
+1. **Agentic-first.** Plain files plus one command. No daemon, no API, no auth.
+2. **The note is the student's, the store is the system's.** The daily note is
+   written by the student, only ever by the student. Structured facts (due
+   dates, status, subject) live in the store the CLI already owns. When they
+   disagree, the store wins and the agent may flag it.
+3. **Consent is an allowlist, enforced locally.** The model sees exactly what
+   local code assembled: today's note minus private blocks, the agent's own
+   knowledge files, the curriculum folder, the timer report. Nothing else on
+   disk, ever. Every payload is logged before inference, so "the private block
+   was not sent" is a test, not a promise.
+4. **Never out of nowhere.** The agent runs only when the student acts in the
+   page. It may be proactive *inside* that moment — surface an observation, a
+   missed task, an opportunity — but it never notifies, never schedules itself.
+5. **Speak with evidence.** Every observation or suggestion carries the
+   evidence it rests on. "Two sessions on DORO, none on the seminar paper due
+   Friday" is allowed. "Time to study" is not.
+6. **Design to become less needed.** Dismissing a suggestion is memory: the
+   same point is not raised again unless the evidence changes. Success is
+   commitments met and self-initiated sessions, never time in the page.
+7. **One device is enough.** No relay, no server, no second machine in the
+   loop. Syncthing may exist on the machine; it is not part of the design.
+8. **Rich on the surface, plain underneath.** The page may be as polished as
+   we like, but the note stays GFM markdown plus callouts, readable by git,
+   Obsidian, and the agent alike.
+9. **The agent reads everything it is allowed, produces nothing submittable.**
+   Questions, plans, observations, proposals. Never an essay.
+
+## Files
+
+All paths relative to the vault unless stated. Names of folders are config.
+
+| What | Where | Written by |
+|---|---|---|
+| Today's note | `inbox/Daily/YYYY.MM.DD.md` | the student, through the page |
+| Day transcript | `agents/student/daily/YYYY.MM.DD.md` | the runner |
+| Day state | `agents/student/daily/YYYY.MM.DD.json` | the runner, rendered by the page |
+| Knowledge | `agents/student/knowledge/` | the runner; the student may edit |
+| Curriculum | folder named in config | the student; read-only for the agent |
+| Deadlines, sessions | `~/.local/state/omarchy-student/` (existing) | the CLI only |
+| Payload log | `~/.local/state/omarchy-student/payloads/` | the runner; never synced |
+| Cost ledger | `~/.local/state/omarchy-student/cost.tsv` | the runner |
+
+**The note.** Created from a template by whoever gets there first (page or
+Obsidian); both check for existence. The template is one line: a link to the
+day's transcript, `[[agents/student/daily/YYYY.MM.DD|agent]]`, unresolved until
+the first reply creates it. No code path except create-if-missing ever writes
+this folder. The page is the one program that edits the note, and only because
+the student typed or ticked in it.
+
+**The transcript.** For the student. One section per block: the quoted block,
+the reply, proposals as checkboxes, and the dive-in dialogue if there was one.
+Cost of each run in the section header.
+
+**The state file.** For the page. Per block hash: state (`seen` | `reply`),
+reply text, proposals, opencode session id, timestamps. Plus the day's
+suggestions. Not pretty; the page renders it.
+
+**Knowledge, three kinds only.** `profile.md` (who the student is, courses,
+how they want to be spoken to); `subjects/<name>.md` (deliverables, what is
+going on, dismissed suggestions); `patterns.md` (intention→outcome record,
+observed habits). A file whose purpose the agent cannot state does not exist.
+
+**Curriculum.** Student-provided course material. PDFs are converted to
+markdown once on arrival by local code, so payloads are always text and always
+logged. Always in the allowlist.
+
+**Store additions.** `deadlines.tsv` gains `subject` and `link` columns. A
+project *is* a subject; milestones are simply deadlines under a subject. No new
+record type. Sessions gain an optional `--for <deadline id>` on `pomo start`.
+An unlogged session is never treated as neglect — group work goes unlogged, and
+that is fine — only as something to ask about.
+
+## Blocks
+
+A block is a paragraph or a list item with its indented children, identified
+by a hash of its text. No ids are written into the note. Editing a block makes
+it new and unprocessed, which is the honest behaviour. Block splitting is a
+pure function shared by the page and the runner.
+
+**Private.** A `> [!private]` callout hides a block. Frontmatter `agent: false`
+hides the day. Both are removed by local code before the payload is built.
+
+## The loop
+
+**Triggers, all from the page.** No file watcher.
+- a completed checkbox line (`- [ ] …` followed by Enter)
+- a completed line starting with `@`
+- a completed line ending with `?` (journaling questions fire too; accepted)
+- a tick (`[ ]` → `[x]`)
+- opening the page (one pass; nothing written if nothing changed since last)
+
+**Run.** The page saves the note and calls the runner with the block that
+fired. The runner:
+1. builds the context from the allowlist, strips private blocks, writes the
+   payload log;
+2. runs `opencode run` with a dedicated agent that has **no tools** — the
+   permission block denies everything — with DeepSeek 4.1 flash via OpenCode
+   Go, one config line;
+3. receives one structured message: reply text, proposals, knowledge updates,
+   suggestions;
+4. applies it locally: appends to the transcript, updates the state file,
+   writes knowledge files, records cost;
+5. exits. Nothing is resident between runs.
+
+Adding tools later is one line in the agent definition; starting without them
+is what keeps the audit trail complete and reversible.
+
+**What a fresh checkbox produces.** A proposal to the deadlines panel when the
+line carries a date or a known subject; one question when it lacks both;
+never silence. Ticking a proposal makes local code run `pomo deadline add`.
+The model never touches the store.
+
+**What a tick produces.** Possibly a follow-up: a grade reminder, a cross-check
+("what about x and y, did you deliver those?"). Possibly nothing.
+
+**Never** asks about unticked boxes. The open-checkboxes panel is the reminder.
+
+**Suggestions.** Found during any run: upcoming tasks, late tasks with a
+deadline, recently added tasks without one, opportunities in the curriculum.
+Evidence attached. Shown in the page only, never as a notification. Dismissal
+is written to knowledge.
+
+**Dive-in.** A plain chat about one block, continuing that block's opencode
+session (`--session`), persisted into the same transcript section. May produce
+the same proposals as a reply.
+
+**Cost.** No caps at first. Every run's cost and tokens go to the transcript
+and the ledger; limits are decided from usage, not guessed.
+
+## The page
+
+- A Quickshell panel in `omarchy-shell`, full screen, summoned by a Hypr key.
+  Fully bound to the Omarchy theme, the way `student.pomo` and
+  `student.deadline` already are. No Chromium.
+- Today's note only. No hierarchy, no file tree. A blank page.
+- Save after every keystroke, coalesced over ~300 ms, flushed on Enter and on
+  close. Escape closes.
+- Blocks painted from the state file: **faded** means seen, a **marker** means
+  a reply is waiting. Keyboard navigation between blocks; a key dives in.
+- Open-checkboxes panel: every unticked box across daily notes, last seven
+  days open, older collapsed. Ticking there edits the original line (the page
+  is the one writer). Merges with the deadlines popup once both exist: a task
+  with a date and a task without one are the same thing to a student.
+- Suggestions panel: the day's suggestions with evidence, dismissable. Same
+  "what's next" view as the checkboxes.
+- Class notes taken during the day go in their own files, linked from the
+  note. The agent reads a linked note only when an `@` line points at it.
+- Sessions: pick a deadline when starting, or don't. The agent may propose one
+  from the last checkbox line.
+- Checkboxes replace the post-session keystroke from `student-os.md` D3: a
+  checkbox line is the intention, the tick is the outcome.
+
+## Modes (later)
+
+- **Companion** — the page as above.
+- **Focus** — full screen, timer as the frame, the agent quietly facilitates.
+- **Study** — the drill pattern from the exam system (an outside assessor
+  scores, the student never rates themself), as a mode of the same page.
+
+## Acceptance tests
+
+- Typing a line that ends in `?` and pressing Enter produces a reply marker on
+  that block in under a minute. Typing a plain line produces nothing.
+- A block inside `> [!private]` is provably absent from the payload log. A
+  day with `agent: false` produces no payload at all.
+- No file under the daily folder is ever opened for writing by the runner
+  (asserted by test, not convention).
+- The opencode agent has no tools: a payload that asks it to read or write a
+  file yields text only.
+- Each run's cost appears in the transcript and the ledger.
+- Nothing is resident between runs.
+- Suspend mid-run: the run completes or is retried on resume; no trigger lost.
+
+## Phases
+
+1. **The page** — Quickshell panel, today's note, plain text, per-keystroke
+   save, Hypr key, theme-bound. Block splitting as shared code. No agent.
+2. **The loop** — runner with allowlist and payload log, tool-less opencode
+   agent, transcript and state file, triggered by the page. The allowlist and
+   no-write tests ship in the same phase. `subject` and `link` on deadlines,
+   `--for` on sessions.
+3. **The overlay** — faded and reply-waiting states, block navigation, dive-in
+   as a plain chat continuing the block's session.
+4. **Proposals** — tick to execute, deadlines with subject and link, conflict
+   flagging, the open-checkboxes panel.
+5. **Knowledge** — the three file kinds accumulate, intention→outcome from
+   checkboxes, suggestions with evidence and remembered dismissals, curriculum
+   folder.
+6. **Rendering** — headings, checkboxes, private callouts drawn properly in
+   the page.
+7. **Focus mode.**
+8. **Study mode.**
+9. **Phone capture**, then **external reading** (portal deep links, reading
+   time estimates, suggested slots, interpretation questions). Last, gated,
+   read-only.
+
+## Decisions log
+
+- 2026-09-16: pivot from todo app to daily note; consent per block; cloud
+  model via opencode; laptop only.
+- 2026-09-17: full review. Own editor in the shell, not Obsidian (blank page,
+  no hierarchy). Page comes first, loop second. Agent never writes the note;
+  one template link is the only touch. Editor is the trigger, no watcher.
+  Signals: checkbox, `@`, `?`, tick, page open — never a schedule. No tools
+  for the model; structured reply applied locally. DeepSeek 4.1 flash via
+  OpenCode Go. Allowlist replaces "human/ default private": `human/` is
+  simply not on the list. Store wins over note. Project = subject, milestones
+  = deadlines. Sessions optionally attach; absence is never evidence. Unticked
+  boxes go to a panel, never to a question. Suggestions with evidence, shown
+  in page only, dismissals remembered. No cost caps until usage is known.
+  Syncthing and the Mac are out of the design. Phone and study mode later.

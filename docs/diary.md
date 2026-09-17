@@ -131,6 +131,13 @@ things must both be true for a block to reach the model: it carries a
   fired on ordinary journaling questions; the sign + confirmation pair is
   the safety mechanism.
 
+**Memory across a day.** Each call is stateless on the provider side and
+opencode only replays a session's history; nothing is remembered for free.
+So every payload carries a compact "what you already said today" section
+(one line per answered block, replies trimmed, suggestions folded) and the
+prompt forbids answering twice. Sessions stay per block; a per-day session
+would replay the whole day on every call for the same effect at more cost.
+
 **Language.** `languages` in the config, first is the default. The runner
 detects which of them the triggering block is written in (a stopword check,
 no dependencies) and states it as a fact at the top of the payload: "the

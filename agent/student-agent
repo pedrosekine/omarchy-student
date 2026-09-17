@@ -300,6 +300,36 @@ def is_known(text: str, known: list[str]) -> bool:
     return any(similar(text, k) for k in known)
 
 
+def earlier_today(paths: Paths, fired: list[dict]) -> list[str]:
+    """What the agent already said today, compact: one line of the block,
+    then the reply. Lets the next call refer back instead of repeating."""
+    state = load_state(paths)
+    skip = {b["hash"] for b in fired}
+    seen_groups: set[str] = set()
+    out = []
+    for h, rec in state.get("blocks", {}).items():
+        if rec.get("state") != "reply" or not rec.get("reply") or h in skip:
+            continue
+        key = ",".join(rec["group"]) if isinstance(rec.get("group"), list) else h
+        if key in seen_groups:
+            continue
+        seen_groups.add(key)
+        head = (rec.get("head") or "").strip()
+        reply = " ".join(rec["reply"].split())
+        if len(reply) > 240:
+            reply = reply[:237] + "…"
+        out.append(f"- {rec.get('at', '')[11:16]} on \"{head[:80]}\": {reply}"
+                   + (f" [then a chat of {len(rec['chat'])} turns]" if rec.get("chat") else ""))
+    raised: list[str] = []
+    for x in state.get("suggestions", []) + state.get("observations", []):
+        text = " ".join(str(x.get("text", "")).split())
+        if text and not is_known(text, raised):
+            raised.append(text[:160])
+    if raised:
+        out.append("Already raised today (do not raise again): " + " | ".join(raised))
+    return out
+
+
 def build_payload(paths: Paths, trigger: str, fired: list[dict], visible: list[dict], cfg: dict | None = None) -> str:
     sample = "\n".join(b["text"] for b in fired) if fired else "\n".join(b["text"] for b in visible[-3:])
     parts = ["# Language", language_line(cfg or {}, sample), "", "# Trigger", f"kind: {trigger}"]
@@ -324,6 +354,10 @@ def build_payload(paths: Paths, trigger: str, fired: list[dict], visible: list[d
         parts += ["", "# Curriculum (student-provided, read-only)", ""]
         for name, text in curriculum:
             parts += [f"## {name}", "", text.rstrip(), ""]
+
+    earlier = earlier_today(paths, fired)
+    if earlier:
+        parts += ["", "# What you already said today (refer back, do not repeat)", ""] + earlier
 
     parts += ["", "# Intentions and outcomes (last 14 days, computed from the notes)", ""]
     parts += outcomes_section(cfg or {})
@@ -447,11 +481,12 @@ def apply(cfg: dict, paths: Paths, trigger: str, fired: list[dict], visible: lis
                 rec["reply"] = rec.get("reply") or ""
             rec["proposals"] = rec.get("proposals", []) + reply["proposals"]
     elif fired:
+        head = " / ".join(b["text"].split("\n")[0] for b in fired)
         for h in hashes:
             rec = state["blocks"].setdefault(h, {})
             rec.update({"state": "reply" if reply["reply"] else "seen", "trigger": trigger,
                         "reply": reply["reply"], "proposals": reply["proposals"], "read": False,
-                        "session": result["session"], "at": at, "cost": result["cost"]})
+                        "session": result["session"], "at": at, "cost": result["cost"], "head": head})
             if len(hashes) > 1:
                 rec["group"] = hashes
             else:

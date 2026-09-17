@@ -246,7 +246,17 @@ def main() -> int:
         r = t.agent("run", "--trigger", "mention", "--hash", at_block["hash"], "--date", "2026.09.17")
         check("book a slot" in dm.read_text(), "model cannot overwrite dismissed.md")
 
-        # 11. stray editor: hash of an edited block no longer matches → refused, no run
+        # 11. the next payload carries what was said earlier today
+        t.set_reply(reply="Brief was unclear, you said.")
+        r = t.agent("run", "--trigger", "mention", "--hash", at_block["hash"], "--date", "2026.09.17")
+        r = t.agent("context", "--trigger", "open", "--date", "2026.09.17")
+        check("What you already said today" in r.stdout and "Brief was unclear, you said." in r.stdout, "earlier replies in payload")
+        check("Already raised today" in r.stdout and "new idea" in r.stdout, "earlier suggestions listed")
+        r = t.agent("context", "--trigger", "mention", "--hash", at_block["hash"], "--date", "2026.09.17")
+        head = r.stdout.split("# Today's note")[0]
+        check("Brief was unclear, you said." not in head, "the fired block's own reply is not echoed back")
+
+        # 12. stray editor: hash of an edited block no longer matches → refused, no run
         t.note.write_text(NOTE)
         r = t.agent("run", "--trigger", "question", "--hash", "deadbeef", "--date", "2026.09.17")
         check(r.returncode != 0, "unknown block hash refused")

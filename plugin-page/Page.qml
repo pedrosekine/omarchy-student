@@ -15,19 +15,22 @@ import "Blocks.js" as Blocks
 //
 // Editing niceties that make markdown capture cheap: Enter continues a list
 // item (checkboxes reset to unticked), Enter on an empty item leaves the
-// list, Tab indents. Ctrl+Up/Down jump between blocks — the same block
+// list, Tab indents. Alt+Up/Down jump between blocks — the same block
 // splitting the agent uses, so the navigation unit and the reply unit are
 // one thing.
 //
-// The page is also the trigger. Finishing a checkbox line, an `@` line, or a
-// line ending in `?` (Enter), ticking a box, or opening the page hands the
-// block to `student-agent`, after the save has landed on disk.
+// The page is also the trigger, but never by accident. Finishing a checkbox
+// line, an `@` line, or a line ending in `?` (Enter), or ticking a box,
+// *stages* the block: a hollow mark appears in the gutter and nothing is
+// sent. Ctrl+Enter sends the block under the cursor to `student-agent` —
+// staged or not — after the save has landed on disk. Opening the page runs
+// one automatic pass so answers are waiting when you come back.
 //
 // The agent's answers are painted, never inserted: a block the agent has
-// seen is veiled a little; a block with a reply carries a mark in the left
-// gutter, accent until you have looked at it. The margin to the right shows
-// the reply for the block under the cursor. Ctrl+Enter dives in: a plain
-// chat about that block, continuing the same session; Esc comes back.
+// seen is veiled a little; a block with a reply carries a filled mark in
+// the gutter, accent until you have looked at it. The margin to the right
+// shows the reply for the block under the cursor. Alt+Right goes into the
+// chat about that block, ready to type; Alt+Left or Esc comes back.
 Item {
   id: root
 
@@ -68,8 +71,10 @@ Item {
 
   // What is painted and what the margin shows.
   property var paint: []
+  property var staged: ({})      // hash -> trigger, waiting for Ctrl+Enter
   property string currentHash: ""
   readonly property var currentRecord: agent.record(currentHash)
+  readonly property string currentStaged: staged[currentHash] || ""
   readonly property bool replyWaiting: root.hasUnreadInNote()
 
   readonly property string problem: svc.configError || svc.error
@@ -160,6 +165,42 @@ Item {
     root.enqueue(cmd, hash)
   }
 
+  function stage(trigger, hash) {
+    if (hash === "") return
+    var next = ({})
+    for (var k in root.staged) next[k] = root.staged[k]
+    next[hash] = trigger
+    root.staged = next
+    root.scheduleRepaint()
+  }
+
+  function unstage(hash) {
+    if (!root.staged[hash]) return
+    var next = ({})
+    for (var k in root.staged) if (k !== hash) next[k] = root.staged[k]
+    root.staged = next
+  }
+
+  // Ctrl+Enter: send the block under the cursor. The trigger is whatever
+  // rule the block meets, or a plain mention when it meets none.
+  function sendCurrent() {
+    var hash = root.currentHash
+    if (hash === "") return
+    var trigger = root.staged[hash] || root.triggerForBlock(hash) || "mention"
+    root.unstage(hash)
+    root.requestRun(trigger, hash)
+  }
+
+  function triggerForBlock(hash) {
+    var blocks = Blocks.split(editor.text)
+    for (var i = 0; i < blocks.length; i++) {
+      if (blocks[i].hash !== hash) continue
+      var lines = blocks[i].text.split("\n")
+      return root.triggerFor(lines[0]) || root.triggerFor(lines[lines.length - 1])
+    }
+    return ""
+  }
+
   function requestChat(hash, message) {
     root.flush()
     root.enqueue([svc.runner, "chat", "--hash", hash, "--message", message], hash)
@@ -217,13 +258,15 @@ Item {
     for (var i = 0; i < blocks.length; i++) {
       var b = blocks[i]
       var rec = agent.record(b.hash)
-      if (!rec) continue
+      var isStaged = !!root.staged[b.hash]
+      if (!rec && !isStaged) continue
       var startPos = root.positionOfLine(b.start)
       var endPos = Math.max(startPos, root.positionOfLine(b.end) - 1)
       var r1 = editor.positionToRectangle(startPos)
       var r2 = editor.positionToRectangle(endPos)
       out.push({ hash: b.hash, y: r1.y, h: r2.y + r2.height - r1.y,
-                 reply: rec.state === "reply", unread: rec.state === "reply" && !rec.read })
+                 reply: !!rec && rec.state === "reply", unread: !!rec && rec.state === "reply" && !rec.read,
+                 seen: !!rec && rec.state !== "reply", staged: isStaged })
     }
     root.paint = out
     root.currentHash = root.hashNearLine(root.lineIndexAt(editor.cursorPosition))
@@ -271,15 +314,16 @@ Item {
       else if (m[4]) marker = (parseInt(m[4], 10) + 1) + m[5] + " "
       editor.insert(pos, "\n" + m[1] + marker)
     }
-    if (trigger !== "") {
-      var hash = root.hashOfLine(lineIndex)
-      if (hash !== "") root.requestRun(trigger, hash)
-    }
+    if (trigger !== "") root.stage(trigger, root.hashOfLine(lineIndex))
   }
 
   function diveIn() {
     if (!root.currentRecord || root.marginWidth <= 0) return
     chatField.forceActiveFocus()
+  }
+
+  function backToNote() {
+    editor.forceActiveFocus()
   }
 
   function sendChat() {
@@ -466,18 +510,21 @@ Item {
             else if (contentY + height <= r.y + r.height) contentY = r.y + r.height - height
           }
 
-          // Gutter marks for blocks with a reply.
+          // Gutter marks: filled for a block with a reply (accent until
+          // read), hollow for a block staged and waiting for Ctrl+Enter.
           Repeater {
             model: root.paint
             Rectangle {
               required property var modelData
-              visible: modelData.reply
+              visible: modelData.reply || modelData.staged
               x: Style.space(2)
               y: modelData.y
               width: Style.space(3)
               height: modelData.h
               radius: width
-              color: modelData.unread ? root.accent : root.dim
+              color: modelData.reply ? (modelData.unread ? root.accent : root.dim) : "transparent"
+              border.width: modelData.reply ? 0 : 1
+              border.color: root.accent
               Behavior on color { ColorAnimation { duration: 240 } }
             }
           }
@@ -509,10 +556,7 @@ Item {
               svc.markPending(text)
               saveTimer.restart()
               var ticked = root.countTicked(text)
-              if (ticked > root.tickedCount) {
-                var hash = root.hashOfLine(root.lineIndexAt(editor.cursorPosition))
-                if (hash !== "") root.requestRun("tick", hash)
-              }
+              if (ticked > root.tickedCount) root.stage("tick", root.hashOfLine(root.lineIndexAt(editor.cursorPosition)))
               root.tickedCount = ticked
               root.scheduleRepaint()
             }
@@ -520,11 +564,12 @@ Item {
             Keys.priority: Keys.BeforeItem
             Keys.onPressed: function (event) {
               var ctrl = event.modifiers & Qt.ControlModifier
+              var alt = event.modifiers & Qt.AltModifier
               if (event.key === Qt.Key_Escape) {
                 root.dismiss()
                 event.accepted = true
               } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-                if (ctrl) { root.diveIn(); event.accepted = true; return }
+                if (ctrl) { root.sendCurrent(); event.accepted = true; return }
                 if (event.modifiers & Qt.ShiftModifier) return
                 root.handleReturn()
                 Qt.callLater(root.flush)
@@ -532,11 +577,14 @@ Item {
               } else if (event.key === Qt.Key_Tab) {
                 editor.insert(editor.cursorPosition, "\t")
                 event.accepted = true
-              } else if (event.key === Qt.Key_Up && ctrl) {
+              } else if (event.key === Qt.Key_Up && alt) {
                 root.jumpBlock(-1)
                 event.accepted = true
-              } else if (event.key === Qt.Key_Down && ctrl) {
+              } else if (event.key === Qt.Key_Down && alt) {
                 root.jumpBlock(1)
+                event.accepted = true
+              } else if (event.key === Qt.Key_Right && alt) {
+                root.diveIn()
                 event.accepted = true
               }
             }
@@ -549,7 +597,7 @@ Item {
             model: root.paint
             Rectangle {
               required property var modelData
-              visible: !modelData.reply
+              visible: modelData.seen
               x: root.gutter
               y: modelData.y
               width: editor.width
@@ -568,7 +616,7 @@ Item {
     // and the field to talk back.
     BorderSurface {
       id: margin
-      visible: root.marginWidth > 0 && root.problem === "" && !!root.currentRecord
+      visible: root.marginWidth > 0 && root.problem === "" && (!!root.currentRecord || root.currentStaged !== "")
       anchors.left: sheet.right
       anchors.leftMargin: root.marginGap
       anchors.top: sheet.top
@@ -654,9 +702,12 @@ Item {
 
           Text {
             width: parent.width
-            visible: !!(root.currentRecord && root.currentRecord.state === "reply") && !chatField.activeFocus
+            visible: !chatField.activeFocus && (root.currentStaged !== "" || !!(root.currentRecord && root.currentRecord.state === "reply"))
             textFormat: Text.PlainText
-            text: "Ctrl+Enter to talk about this"
+            wrapMode: Text.WordWrap
+            text: root.currentStaged !== ""
+              ? "Ctrl+Enter sends this to the agent"
+              : "Alt+Right to talk about this · Ctrl+Enter to ask again"
             color: root.faint
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -685,7 +736,10 @@ Item {
           foreground: root.foreground
           Keys.onReturnPressed: function (event) { event.accepted = true; root.sendChat() }
           Keys.onEnterPressed: function (event) { event.accepted = true; root.sendChat() }
-          Keys.onEscapePressed: function (event) { event.accepted = true; editor.forceActiveFocus() }
+          Keys.onEscapePressed: function (event) { event.accepted = true; root.backToNote() }
+          Keys.onPressed: function (event) {
+            if (event.key === Qt.Key_Left && (event.modifiers & Qt.AltModifier)) { root.backToNote(); event.accepted = true }
+          }
         }
       }
     }

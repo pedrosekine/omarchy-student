@@ -99,7 +99,12 @@
             toggles the page and turns active when a reply is unread.
             `AgentState.qml` reads today's state file for both. Gotcha: the
             page is keepLoaded, so QML changes need `omarchy restart shell`,
-            not just a copy.
+            not just a copy. Revised the same afternoon: Enter/tick only
+            *stage* a block (hollow mark), `Ctrl+Enter` sends; keys moved to
+            `Alt+Up/Down` (blocks), `Alt+Right` (chat), `Alt+Left`/Esc
+            (back); `language` in config travels in every payload after a
+            Dutch reply to an English note; open-pass observations kept in
+            state under `observations` for the suggestions panel.
       - [ ] 14.4 proposals — tick to execute, conflict flag, open-checkboxes panel.
       - [ ] 14.5 knowledge — profile/subjects/patterns, intention→outcome,
             suggestions with evidence, curriculum folder.

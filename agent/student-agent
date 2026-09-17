@@ -156,8 +156,12 @@ def load_state(paths: Paths) -> dict:
         return {"date": paths.stamp, "blocks": {}, "suggestions": [], "runs": []}
 
 
-def build_payload(paths: Paths, trigger: str, block: dict | None, visible: list[dict]) -> str:
-    parts = ["# Trigger", f"kind: {trigger}"]
+def language_line(cfg: dict) -> str:
+    return f"Always answer in {cfg.get('language') or 'English'}, whatever language the note is in."
+
+
+def build_payload(paths: Paths, trigger: str, block: dict | None, visible: list[dict], cfg: dict | None = None) -> str:
+    parts = ["# Language", language_line(cfg or {}), "", "# Trigger", f"kind: {trigger}"]
     if block is not None:
         parts.append(f"block: {block['hash']}")
         parts.append("")
@@ -288,6 +292,9 @@ def apply(cfg: dict, paths: Paths, trigger: str, block: dict | None, visible: li
         rec.update({"state": "reply" if reply["reply"] else "seen", "trigger": trigger,
                     "reply": reply["reply"], "proposals": reply["proposals"], "read": False,
                     "session": result["session"], "at": at, "cost": result["cost"]})
+    elif reply["reply"]:
+        state.setdefault("observations", []).append({"text": reply["reply"], "at": at, "trigger": trigger,
+                                                     "session": result["session"], "read": False})
     for s in reply["suggestions"]:
         state["suggestions"].append({"text": str(s.get("text") or ""), "evidence": str(s.get("evidence") or ""),
                                      "block": hash_, "at": at, "dismissed": False})
@@ -361,7 +368,7 @@ def prepare(cfg: dict, args) -> tuple[Paths, list[dict], dict | None]:
 
 def cmd_context(cfg: dict, args) -> int:
     paths, visible, block = prepare(cfg, args)
-    sys.stdout.write(build_payload(paths, args.trigger, block, visible))
+    sys.stdout.write(build_payload(paths, args.trigger, block, visible, cfg))
     return 0
 
 
@@ -372,7 +379,7 @@ def cmd_run(cfg: dict, args) -> int:
         if all(b["hash"] in known for b in visible):
             print("open: nothing new since the last pass")
             return 0
-    payload = build_payload(paths, args.trigger, block, visible)
+    payload = build_payload(paths, args.trigger, block, visible, cfg)
     paths.payloads.mkdir(parents=True, exist_ok=True)
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     payload_file = paths.payloads / f"{stamp}-{args.trigger}-{block['hash'] if block else 'open'}.md"
@@ -416,13 +423,14 @@ def cmd_chat(cfg: dict, args) -> int:
     if session:
         # The session already holds the context and the first reply; only the
         # student's words travel. Logged all the same.
-        payload = f"The student replies about block {args.hash}:\n\n{message}\n\nAnswer with the same JSON contract.\n"
+        payload = (f"{language_line(cfg)}\n\nThe student replies about block {args.hash}:\n\n{message}\n\n"
+                   "Answer with the same JSON contract.\n")
         payload_file.write_text(payload)
         result = run_model(cfg, paths, "", session=session, message=payload)
     else:
         if block is None:
             raise Fail(f"block {args.hash} has no session and is not in the visible note")
-        payload = build_payload(paths, "mention", block, visible)
+        payload = build_payload(paths, "mention", block, visible, cfg)
         payload += f"\n# The student says\n\n{message}\n"
         payload_file.write_text(payload)
         result = run_model(cfg, paths, payload)

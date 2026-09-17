@@ -39,8 +39,10 @@ See `docs/plan.md` for full steps.
 blank sheet in the current theme, saved on every keystroke. `SUPER+ALT+=` or
 the `󰏫` bar glyph opens it, `Esc` closes. Blocks the agent has seen are
 veiled; a block with a reply carries a gutter mark and its reply shows in the
-margin to the right. `Ctrl+Up/Down` move between blocks, `Ctrl+Enter` opens a
-chat about the current block, `Esc` comes back. Needs `~/.config/omarchy-student/config.json` (copy
+margin to the right. Finishing a checkbox, `@`, or `?` line stages the block
+(hollow mark); `Ctrl+Enter` sends it. `Alt+Up/Down` move between blocks,
+`Alt+Right` opens the chat about the current block, `Alt+Left` or `Esc` comes
+back. Set `language` in the config; the agent answers in it. Needs `~/.config/omarchy-student/config.json` (copy
 `config.example.json`) pointing at your vault; the note lives at
 `<vault>/<daily.dir>/<date>.md` exactly where Obsidian's daily notes would.
 

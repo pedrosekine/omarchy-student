@@ -103,12 +103,22 @@ hides the day. Both are removed by local code before the payload is built.
 
 ## The loop
 
-**Triggers, all from the page.** No file watcher.
-- a completed checkbox line (`- [ ] …` followed by Enter)
-- a completed line starting with `@`
-- a completed line ending with `?` (journaling questions fire too; accepted)
-- a tick (`[ ]` → `[x]`)
-- opening the page (one pass; nothing written if nothing changed since last)
+**Triggers, all from the page, never by accident.** No file watcher.
+- Finishing a line that meets a rule — a checkbox line (`- [ ] …`), a line
+  starting with `@`, a line ending with `?` — or ticking a box **stages**
+  the block: a hollow accent mark in the gutter, nothing sent.
+- `Ctrl+Enter` sends the block under the cursor, staged or not (a block that
+  meets no rule goes as a plain mention). This is the only way a block
+  reaches the model.
+- Opening the page runs one automatic pass (skipped when nothing is new), so
+  answers are waiting when the student comes back. Its observations have no
+  block; they are kept in the state file for the suggestions panel.
+- Decided 2026-09-17 after the first day of use: automatic sends on Enter
+  fired on ordinary journaling questions, so the staging step went in.
+
+**Language.** `language` in the config, sent as an explicit instruction at
+the top of every payload. A small model asked to "use the student's
+language" answered in Dutch to an English note; explicit beats inferred.
 
 **Run.** The page saves the note and calls the runner with the block that
 fired. The runner:
@@ -159,8 +169,14 @@ and the ledger; limits are decided from usage, not guessed.
 - The template's link line never enters the editor: the page holds it apart,
   shows a faded "agent" mark in the header, and writes the line back
   unchanged on every save. That mark becomes the reply-waiting marker.
-- Blocks painted from the state file: **faded** means seen, a **marker** means
-  a reply is waiting. Keyboard navigation between blocks; a key dives in.
+- Blocks painted from the state file: **faded** means seen, a **filled
+  mark** means a reply (accent until read), a **hollow mark** means staged.
+  `Alt+Up/Down` move between blocks, `Alt+Right` goes into the chat about
+  the current block ready to type, `Alt+Left` or `Esc` comes back,
+  `Ctrl+Enter` sends.
+- A block is a paragraph (consecutive lines, blank line ends it), a
+  top-level list item with its indented children, a heading, or a callout.
+  Two lines with no blank between them are one block.
 - A bar glyph toggles the page with the mouse — the quick-add gesture — and
   carries the reply-waiting state (the plugin declares both `overlay` and
   `bar-widget`). Ships with the overlay phase.
@@ -227,7 +243,8 @@ only the window and the panels around it differ.
    checkboxes, suggestions with evidence and remembered dismissals, curriculum
    folder.
 6. **Rendering** — headings, checkboxes, private callouts drawn properly in
-   the page.
+   the page; space between blocks visibly larger than between lines, so the
+   block rule is legible without knowing it.
 7. **Focus mode.**
 8. **Study mode.**
 9. **Phone capture**, then **external reading** (portal deep links, reading

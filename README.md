@@ -13,13 +13,17 @@ agent reads and answers — reference plan in `docs/diary.md`.
 
 ## Scope v0.1 (keyboard shortcuts only)
 
-- `pomo start [focus|break|up] [minutes|up]|pause|resume|toggle|reset|skip|status` from terminal
-  (`pomo start up` runs an open-ended count-up focus session; skipping it logs
-  the elapsed time as a completed session)
-- `pomo deadline add|set|list|done|reopen|grade|hide|unhide|rm|next` — manual
-  deadlines with free-text dates ("next friday 17:00", "in 3 days"); `done`
-  takes one off the clock, `grade` records the mark, `hide` keeps the record
-  but drops it from the list
+- `pomo start [focus|break|up] [minutes|up] [--for <deadline id>]|pause|resume|toggle|reset|skip|status`
+  from terminal (`pomo start up` runs an open-ended count-up focus session;
+  skipping it logs the elapsed time as a completed session; `--for 3` ties
+  the session to deadline #3 so its log lines read `focus completed · 25:00 · for #3 Essay draft`)
+- `pomo deadline add <title> [--subject <s>] [--link <url-or-path>] <when...>`,
+  `set <id> [--title <t>] [--subject <s>] [--link <l>] [<when...>]`,
+  `list [--all] [--json] [--subject <s>]`, `done|reopen|grade|hide|unhide|rm|next`
+  — manual deadlines with free-text dates ("next friday 17:00", "in 3 days");
+  `--subject` is the course or project it belongs to, `--link` the file or URL
+  for the thing itself; `done` takes one off the clock, `grade` records the
+  mark, `hide` keeps the record but drops it from the list
 - Hypr bindings example in `docs/plan.md`
 - State in JSON file, no bar widget yet
 
@@ -42,6 +46,22 @@ cp -r plugin-page ~/.config/omarchy/plugins/student.page   # then add {"id":"stu
 python3 tests/test_blocks.py                                # block splitter, JS and Python must agree (needs node)
 ```
 
+## The loop (phase 14.2)
+
+`agent/student-agent` is what the page calls when you finish a checkbox line,
+an `@` line, a line ending in `?`, tick a box, or open the page. It builds
+the context from an allowlist, logs it, runs a tool-less opencode agent, and
+writes the reply to `agents/student/daily/<date>.md` in your vault. It never
+writes under your daily-notes folder.
+
+```bash
+ln -s "$PWD/agent/student-agent" ~/.local/bin/student-agent
+student-agent install                       # opencode agent definition + folders
+student-agent context --trigger open        # show exactly what the model would see
+student-agent run --trigger open            # one pass over today's note
+python3 tests/test_agent.py                 # offline, stub opencode
+```
+
 ## Pointing an agent at it
 
 Everything is plain files plus one command, no daemon:
@@ -56,9 +76,9 @@ Files live in `~/.local/state/omarchy-student/`:
 
 | File | What |
 |------|------|
-| `deadlines.tsv` | `id<TAB>due_epoch<TAB>title<TAB>status<TAB>done_at_epoch<TAB>grade` — status is open / done / hidden |
+| `deadlines.tsv` | `id<TAB>due_epoch<TAB>title<TAB>status<TAB>done_at_epoch<TAB>grade<TAB>subject<TAB>link` — status is open / done / hidden; subject and link may be empty (older lines stop after grade and read the same) |
 | `pomo.log` | one line per event (`focus completed · 25:00`, `deadline #3 graded 7.5 · Essay`) — the history an agent reasons over |
-| `state.json` | current timer |
+| `state.json` | current timer, incl. `"for"`: the deadline id the running session is for (0 when none) |
 
 Ids are stable and never reused, so a log line about `#3` always means the same
 deadline. Write through the CLI (`pomo deadline ...`), not to the files, so the

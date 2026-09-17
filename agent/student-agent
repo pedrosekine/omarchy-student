@@ -1,0 +1,410 @@
+#!/usr/bin/env python3
+"""student-agent — the loop between today's note and the model.
+
+    student-agent run --trigger <kind> [--hash <block>] [--date YYYY.MM.DD]
+    student-agent context --trigger <kind> [--hash <block>]   # payload only, no model
+    student-agent state [--date YYYY.MM.DD]                    # today's state JSON
+    student-agent install                                      # opencode agent def + dirs
+
+One pass, then exit. Nothing is resident. The model gets no tools: everything
+it may see is assembled here from an allowlist (today's note minus private
+blocks, the agent's own knowledge files, the curriculum folder, the timer and
+deadline report), logged verbatim to the payload log before inference, and
+everything it says back is applied here — transcript, state file, knowledge
+files, cost ledger. No code path in this file opens anything under the daily
+notes folder for writing; `guard_write` enforces that.
+
+Config: ~/.config/omarchy-student/config.json (see config.example.json).
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import blocks as blocklib  # noqa: E402
+
+TRIGGERS = ("checkbox", "mention", "question", "tick", "open")
+LINK_LINE = re.compile(r"^\[\[[^\]\n]*\|agent\]\]$")
+KNOWLEDGE_FILE = re.compile(r"^(profile\.md|patterns\.md|subjects/[A-Za-z0-9._ -]{1,64}\.md)$")
+
+CONFIG_PATH = Path(os.environ.get("OMARCHY_STUDENT_CONFIG")
+                   or Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "omarchy-student" / "config.json")
+STATE_HOME = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") / "omarchy-student"
+
+
+class Fail(Exception):
+    pass
+
+
+# ----------------------------------------------------------------- config
+
+def load_config() -> dict:
+    try:
+        cfg = json.loads(CONFIG_PATH.read_text())
+    except FileNotFoundError:
+        raise Fail(f"no config at {CONFIG_PATH}")
+    except json.JSONDecodeError as e:
+        raise Fail(f"config is not valid JSON: {e}")
+    if not cfg.get("vault") or not cfg.get("daily", {}).get("dir"):
+        raise Fail("config needs vault and daily.dir")
+    return cfg
+
+
+def moment_to_strftime(fmt: str) -> str:
+    return (fmt.replace("YYYY", "%Y").replace("YY", "%y").replace("MM", "%m")
+            .replace("DD", "%d").replace("HH", "%H").replace("mm", "%M"))
+
+
+def day_stamp(cfg: dict, date: dt.date) -> str:
+    return date.strftime(moment_to_strftime(cfg["daily"].get("format", "YYYY-MM-DD")))
+
+
+class Paths:
+    def __init__(self, cfg: dict, date: dt.date):
+        self.vault = Path(cfg["vault"])
+        self.stamp = day_stamp(cfg, date)
+        self.daily_dir = self.vault / cfg["daily"]["dir"]
+        self.note = self.daily_dir / f"{self.stamp}.md"
+        self.agent_dir = self.vault / cfg.get("agentDir", "agents/student")
+        self.transcript = self.agent_dir / "daily" / f"{self.stamp}.md"
+        self.state = self.agent_dir / "daily" / f"{self.stamp}.json"
+        self.knowledge = self.agent_dir / "knowledge"
+        self.curriculum = (self.vault / cfg["curriculum"]) if cfg.get("curriculum") else None
+        self.payloads = STATE_HOME / "payloads"
+        self.ledger = STATE_HOME / "cost.tsv"
+        self.cwd = STATE_HOME / "agent-cwd"
+
+
+# ------------------------------------------------------------------ writes
+
+def guard_write(paths: Paths, target: Path) -> None:
+    """The one rule that lets the agent say 'I never touched your prose'."""
+    t = target.resolve()
+    d = paths.daily_dir.resolve()
+    if t == d or d in t.parents:
+        raise Fail(f"refusing to write under the daily folder: {target}")
+
+
+def write_atomic(paths: Paths, target: Path, text: str) -> None:
+    guard_write(paths, target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.replace(tmp, target)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def append_text(paths: Paths, target: Path, text: str) -> None:
+    guard_write(paths, target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with open(target, "a") as f:
+        f.write(text)
+
+
+# ----------------------------------------------------------------- context
+
+def note_is_private(blks: list[dict]) -> bool:
+    for b in blks:
+        if b["kind"] == "frontmatter":
+            return re.search(r"^agent:\s*false\s*$", b["text"], re.M) is not None
+    return False
+
+
+def visible_blocks(blks: list[dict]) -> list[dict]:
+    return [b for b in blks if not b["private"] and not LINK_LINE.match(b["text"])]
+
+
+def read_tree(root: Path | None, suffix: str = ".md") -> list[tuple[str, str]]:
+    if root is None or not root.is_dir():
+        return []
+    out = []
+    for p in sorted(root.rglob(f"*{suffix}")):
+        if p.is_file():
+            out.append((str(p.relative_to(root)), p.read_text(errors="replace")))
+    return out
+
+
+def pomo_report() -> str:
+    try:
+        r = subprocess.run(["pomo", "report", "--json"], capture_output=True, text=True, timeout=10)
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def load_state(paths: Paths) -> dict:
+    try:
+        return json.loads(paths.state.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"date": paths.stamp, "blocks": {}, "suggestions": [], "runs": []}
+
+
+def build_payload(paths: Paths, trigger: str, block: dict | None, visible: list[dict]) -> str:
+    parts = ["# Trigger", f"kind: {trigger}"]
+    if block is not None:
+        parts.append(f"block: {block['hash']}")
+        parts.append("")
+        parts.append("\n".join("> " + l for l in block["text"].split("\n")))
+    parts += ["", "# Today's note (private parts removed)", ""]
+    parts.append("\n\n".join(b["text"] for b in visible) or "(empty)")
+
+    knowledge = read_tree(paths.knowledge)
+    parts += ["", "# Your knowledge files", ""]
+    if knowledge:
+        for name, text in knowledge:
+            parts += [f"## {name}", "", text.rstrip(), ""]
+    else:
+        parts.append("(none yet)")
+
+    curriculum = read_tree(paths.curriculum)
+    if curriculum:
+        parts += ["", "# Curriculum (student-provided, read-only)", ""]
+        for name, text in curriculum:
+            parts += [f"## {name}", "", text.rstrip(), ""]
+
+    report = pomo_report()
+    parts += ["", "# Timer and deadlines (pomo report --json)", "", report or "(unavailable)"]
+    return "\n".join(parts) + "\n"
+
+
+# ------------------------------------------------------------------- model
+
+def run_model(cfg: dict, paths: Paths, payload: str) -> dict:
+    """Run one opencode pass. Returns {text, session, cost, tokens, events, error}."""
+    paths.cwd.mkdir(parents=True, exist_ok=True)
+    cmd = [cfg.get("opencode", "opencode"), "run", "--pure", "--format", "json",
+           "--agent", cfg.get("agent", "student"), "--dir", str(paths.cwd)]
+    if cfg.get("model"):
+        cmd += ["--model", cfg["model"]]
+    cmd.append("Context follows on stdin.")
+    try:
+        proc = subprocess.run(cmd, input=payload, capture_output=True, text=True, timeout=600)
+    except FileNotFoundError:
+        raise Fail(f"opencode not found ({cmd[0]})")
+    except subprocess.TimeoutExpired:
+        raise Fail("opencode timed out after 600s")
+
+    out = {"text": "", "session": "", "cost": 0.0,
+           "tokens": {"input": 0, "output": 0, "reasoning": 0, "total": 0},
+           "events": proc.stdout, "error": ""}
+    texts = []
+    for line in proc.stdout.splitlines():
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        out["session"] = ev.get("sessionID") or out["session"]
+        part = ev.get("part") or {}
+        if ev.get("type") == "text":
+            texts.append(part.get("text", ""))
+        elif ev.get("type") == "step_finish":
+            out["cost"] += float(part.get("cost") or 0)
+            tk = part.get("tokens") or {}
+            for k in ("input", "output", "reasoning", "total"):
+                out["tokens"][k] += int(tk.get(k) or 0)
+        elif ev.get("type") == "error":
+            err = ev.get("error")
+            out["error"] = json.dumps(err) if not isinstance(err, str) else err
+    out["text"] = "\n".join(texts)
+    if proc.returncode != 0 and not out["error"]:
+        out["error"] = (proc.stderr or "").strip()[-2000:] or f"opencode exited {proc.returncode}"
+    return out
+
+
+def parse_reply(text: str) -> dict:
+    """The contract is one fenced JSON block; anything else becomes the reply."""
+    empty = {"reply": "", "proposals": [], "suggestions": [], "knowledge": []}
+    m = None
+    for m in re.finditer(r"```(?:json)?\s*\n(.*?)\n```", text, re.S):
+        pass
+    candidates = [m.group(1)] if m else []
+    candidates.append(text.strip())
+    for c in candidates:
+        try:
+            obj = json.loads(c)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            out = dict(empty)
+            out["reply"] = str(obj.get("reply") or "")
+            for k in ("proposals", "suggestions", "knowledge"):
+                v = obj.get(k)
+                out[k] = [x for x in v if isinstance(x, dict)] if isinstance(v, list) else []
+            return out
+    out = dict(empty)
+    out["reply"] = text.strip()
+    return out
+
+
+# ------------------------------------------------------------------- apply
+
+def apply(cfg: dict, paths: Paths, trigger: str, block: dict | None, visible: list[dict],
+          result: dict, reply: dict, payload_file: Path) -> dict:
+    now = dt.datetime.now()
+    at = now.isoformat(timespec="seconds")
+    state = load_state(paths)
+    hash_ = block["hash"] if block else ""
+
+    # Every block the model saw is now "seen"; the fired one gets the reply.
+    for b in visible:
+        state["blocks"].setdefault(b["hash"], {"state": "seen", "at": at})
+    if block:
+        rec = state["blocks"].setdefault(hash_, {})
+        rec.update({"state": "reply" if reply["reply"] else "seen", "trigger": trigger,
+                    "reply": reply["reply"], "proposals": reply["proposals"],
+                    "session": result["session"], "at": at, "cost": result["cost"]})
+    for s in reply["suggestions"]:
+        state["suggestions"].append({"text": str(s.get("text") or ""), "evidence": str(s.get("evidence") or ""),
+                                     "block": hash_, "at": at, "dismissed": False})
+    written = []
+    for k in reply["knowledge"]:
+        name = str(k.get("file") or "")
+        if not KNOWLEDGE_FILE.match(name):
+            continue
+        write_atomic(paths, paths.knowledge / name, str(k.get("content") or "").rstrip() + "\n")
+        written.append(name)
+    state["runs"].append({"at": at, "trigger": trigger, "block": hash_, "session": result["session"],
+                          "cost": result["cost"], "tokens": result["tokens"], "payload": str(payload_file),
+                          "knowledge": written, "error": result["error"]})
+    write_atomic(paths, paths.state, json.dumps(state, indent=2, ensure_ascii=False) + "\n")
+
+    # Transcript: for the student, one section per run.
+    if not paths.transcript.exists():
+        append_text(paths, paths.transcript,
+                    f"# {paths.stamp} — agent\n\nNote: [[{paths.daily_dir.relative_to(paths.vault)}/{paths.stamp}]]\n")
+    sec = [f"\n## {now.strftime('%H:%M')} · {trigger}" + (f" · `{hash_}`" if hash_ else ""), ""]
+    if block:
+        sec += ["> " + l for l in block["text"].split("\n")] + [""]
+    sec.append(reply["reply"] if reply["reply"] else "_(nothing to add)_")
+    for p in reply["proposals"]:
+        if p.get("kind") == "deadline":
+            sec.append(f"- [ ] add deadline: {p.get('title', '')} — {p.get('when', '')}"
+                       + (f" · {p['subject']}" if p.get("subject") else ""))
+    for s in reply["suggestions"]:
+        sec.append(f"- suggestion: {s.get('text', '')} _(evidence: {s.get('evidence', '')})_")
+    if result["error"]:
+        sec.append(f"- error: {result['error']}")
+    tk = result["tokens"]
+    sec.append(f"\n<small>${result['cost']:.4f} · {tk['total']} tokens · {cfg.get('model') or 'agent default'}</small>\n")
+    append_text(paths, paths.transcript, "\n".join(sec))
+
+    # Ledger: one line per run, never synced.
+    paths.ledger.parent.mkdir(parents=True, exist_ok=True)
+    if not paths.ledger.exists():
+        paths.ledger.write_text("at\tdate\ttrigger\tblock\tcost\tinput\toutput\treasoning\tsession\n")
+    with open(paths.ledger, "a") as f:
+        f.write(f"{at}\t{paths.stamp}\t{trigger}\t{hash_}\t{result['cost']:.6f}\t{tk['input']}\t{tk['output']}\t{tk['reasoning']}\t{result['session']}\n")
+    return state
+
+
+# ---------------------------------------------------------------- commands
+
+def prepare(cfg: dict, args) -> tuple[Paths, list[dict], dict | None]:
+    date = dt.datetime.strptime(args.date, moment_to_strftime(cfg["daily"].get("format", "YYYY-MM-DD"))).date() \
+        if args.date else dt.date.today()
+    paths = Paths(cfg, date)
+    try:
+        text = paths.note.read_text()
+    except FileNotFoundError:
+        raise Fail(f"no note for {paths.stamp}")
+    blks = blocklib.split(text)
+    if note_is_private(blks):
+        raise Fail("today is marked agent: false")
+    visible = visible_blocks(blks)
+    block = None
+    if args.hash:
+        block = next((b for b in visible if b["hash"] == args.hash), None)
+        if block is None:
+            raise Fail(f"block {args.hash} is not in the visible note (edited, private, or gone)")
+    elif args.trigger != "open":
+        raise Fail("--hash is required for every trigger except open")
+    return paths, visible, block
+
+
+def cmd_context(cfg: dict, args) -> int:
+    paths, visible, block = prepare(cfg, args)
+    sys.stdout.write(build_payload(paths, args.trigger, block, visible))
+    return 0
+
+
+def cmd_run(cfg: dict, args) -> int:
+    paths, visible, block = prepare(cfg, args)
+    if args.trigger == "open":
+        known = load_state(paths)["blocks"]
+        if all(b["hash"] in known for b in visible):
+            print("open: nothing new since the last pass")
+            return 0
+    payload = build_payload(paths, args.trigger, block, visible)
+    paths.payloads.mkdir(parents=True, exist_ok=True)
+    stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    payload_file = paths.payloads / f"{stamp}-{args.trigger}-{block['hash'] if block else 'open'}.md"
+    payload_file.write_text(payload)
+    result = run_model(cfg, paths, payload)
+    payload_file.with_suffix(".events.jsonl").write_text(result["events"])
+    reply = parse_reply(result["text"]) if not result["error"] else \
+        {"reply": "", "proposals": [], "suggestions": [], "knowledge": []}
+    apply(cfg, paths, args.trigger, block, visible, result, reply, payload_file)
+    if result["error"]:
+        print(f"error: {result['error']}", file=sys.stderr)
+        return 1
+    print(f"{args.trigger} {block['hash'] if block else ''}: "
+          f"{'reply' if reply['reply'] else 'silent'} · ${result['cost']:.4f} · {result['tokens']['total']} tokens")
+    return 0
+
+
+def cmd_state(cfg: dict, args) -> int:
+    date = dt.datetime.strptime(args.date, moment_to_strftime(cfg["daily"].get("format", "YYYY-MM-DD"))).date() \
+        if args.date else dt.date.today()
+    print(json.dumps(load_state(Paths(cfg, date)), indent=2, ensure_ascii=False))
+    return 0
+
+
+def cmd_install(cfg: dict, args) -> int:
+    here = Path(__file__).resolve().parent
+    src = here / "opencode" / "student.md"
+    dst = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "opencode" / "agent" / "student.md"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_text(src.read_text())
+    paths = Paths(cfg, dt.date.today())
+    for d in (paths.agent_dir / "daily", paths.knowledge, paths.payloads, paths.cwd):
+        d.mkdir(parents=True, exist_ok=True)
+    print(f"agent definition → {dst}\nagent folder → {paths.agent_dir}\npayload log → {paths.payloads}")
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(prog="student-agent")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    for name in ("run", "context"):
+        p = sub.add_parser(name)
+        p.add_argument("--trigger", required=True, choices=TRIGGERS)
+        p.add_argument("--hash", default="")
+        p.add_argument("--date", default="")
+    sub.add_parser("state").add_argument("--date", default="")
+    sub.add_parser("install")
+    args = ap.parse_args(argv)
+    try:
+        cfg = load_config()
+        return {"run": cmd_run, "context": cmd_context, "state": cmd_state, "install": cmd_install}[args.cmd](cfg, args)
+    except Fail as e:
+        print(f"student-agent: {e}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

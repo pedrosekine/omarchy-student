@@ -3,7 +3,8 @@ import Quickshell
 import Quickshell.Io
 
 // Live deadline list. Watches the CLI's deadlines.tsv (one
-// "id<TAB>epoch<TAB>title<TAB>status<TAB>done_at<TAB>grade" per line) and
+// "id<TAB>epoch<TAB>title<TAB>status<TAB>done_at<TAB>grade<TAB>subject<TAB>link"
+// per line; older lines stop after grade or after title) and
 // recomputes countdowns locally every second — same no-polling shape as the
 // pomodoro Service. All writes go through the CLI so the file has one owner.
 Item {
@@ -95,7 +96,7 @@ Item {
       var id = parseInt(f[0], 10)
       var due = parseInt(f[1], 10)
       if (!isFinite(id) || !isFinite(due)) continue
-      // Columns past the sixth are ignored rather than folded into the
+      // Columns past the eighth are ignored rather than folded into the
       // title: the widget is installed as a *copy* of this file, so a newer
       // CLI adding a column must not make a stale install render it as text.
       var status = f.length > 3 ? f[3] : "open"
@@ -108,7 +109,9 @@ Item {
         title: f[2],
         status: status,
         doneAt: isFinite(doneAt) ? doneAt : 0,
-        grade: f.length > 5 ? f[5] : ""
+        grade: f.length > 5 ? f[5] : "",
+        subject: f.length > 6 ? f[6] : "",
+        link: f.length > 7 ? f[7] : ""
       })
     }
     // Open ones first (they are what the list is for), then done ones fade

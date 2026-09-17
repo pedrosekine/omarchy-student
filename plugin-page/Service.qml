@@ -44,6 +44,12 @@ Item {
 
   signal loaded()
   signal externalChange()
+  signal savedNow()
+
+  // Where the runner lives and where it writes. The page only reads these.
+  readonly property string runner: (config && config.runner) || (Quickshell.env("HOME") + "/.local/bin/student-agent")
+  readonly property string agentDir: configured ? config.vault + "/" + (config.agentDir || "agents/student") : ""
+  readonly property string statePath: agentDir !== "" && noteDate !== "" ? agentDir + "/daily/" + noteDate + ".json" : ""
 
   property string lastWritten: ""
 
@@ -80,8 +86,11 @@ Item {
     root.body = t.substring(m[0].length)
   }
 
+  // The blank line after the link is what keeps the link its own block for
+  // the runner; put it back if the student deleted it.
   function joinHeader(bodyText) {
-    return root.header === "" ? bodyText : root.header + "\n" + bodyText
+    if (root.header === "") return bodyText
+    return root.header + "\n" + (bodyText.charAt(0) === "\n" ? bodyText : "\n" + bodyText)
   }
 
   function renderTemplate(raw, stamp) {
@@ -197,7 +206,7 @@ Item {
       root.error = "Cannot read " + root.notePath + ": " + FileViewError.toString(err)
       root.ready = false
     }
-    onSaved: { root.saving = false; root.pending = false }
+    onSaved: { root.saving = false; root.pending = false; root.savedNow() }
     onSaveFailed: function (err) {
       root.saving = false
       root.error = "Cannot write " + root.notePath + ": " + FileViewError.toString(err)

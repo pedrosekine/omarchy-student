@@ -63,9 +63,28 @@
             `{"id":"student.page"}` to `plugins[]` in shell.json, bind
             `SUPER+ALT+=` → `omarchy-shell shell toggle student.page '{}'`.
             Gotcha: overlays are toggled via the `shell` target, not their id.
-      - [ ] 14.2 the loop — runner (allowlist, payload log, tool-less opencode
-            agent, transcript + state), triggered by the page; allowlist and
-            no-write tests; `subject`/`link` on deadlines; `--for` on sessions.
+      - [x] 14.2 the loop — `agent/student-agent` (Python, no deps): builds
+            the payload from the allowlist (note minus private blocks and the
+            link line, knowledge files, curriculum folder, `pomo report`),
+            logs it to `~/.local/state/omarchy-student/payloads/`, runs
+            `opencode run --pure --agent student --format json` with the
+            tool-less agent in `agent/opencode/student.md` (DeepSeek 4.1
+            flash via OpenCode Go), parses one fenced JSON block (reply,
+            proposals, suggestions, knowledge), and applies it: transcript
+            `agents/student/daily/<date>.md`, state `<date>.json`, knowledge
+            files (path-guarded), `cost.tsv`. `guard_write` refuses any path
+            under the daily folder. Page triggers: Enter after a checkbox /
+            `@` / `?` line, a tick, and page open (skipped when nothing is
+            new); runs launch only after the save has landed; header mark
+            brightens while running, accent when a reply waits for a block
+            still in the note. Tests: `tests/test_agent.py` (stub opencode:
+            allowlist, no-write, apply, quiet open, private day) — all green.
+            CLI: `deadlines.tsv` is 8 columns (`subject`, `link`), `pomo
+            deadline add/set --subject --link`, `list --subject`, `pomo start
+            --for <id>` carried into state and every log line. First real
+            run: silent open pass $0.0009; a mention got a specific,
+            evidence-based reply for $0.0005. Watch: model latency varied
+            1 s → 10 s → 50 s across three calls; provider-side.
       - [ ] 14.3 the overlay — seen/reply states, block navigation, dive-in chat.
       - [ ] 14.4 proposals — tick to execute, conflict flag, open-checkboxes panel.
       - [ ] 14.5 knowledge — profile/subjects/patterns, intention→outcome,

@@ -1,4 +1,5 @@
 import Quickshell
+import Quickshell.Io
 import Quickshell.Wayland
 import QtQuick
 import qs.Commons
@@ -14,8 +15,14 @@ import "Blocks.js" as Blocks
 // Editing niceties that make markdown capture cheap: Enter continues a list
 // item (checkboxes reset to unticked), Enter on an empty item leaves the
 // list, Tab indents. Ctrl+Up/Down jump between blocks — the same block
-// splitting the agent will use, so the navigation unit and the reply unit
-// are one thing from day one.
+// splitting the agent uses, so the navigation unit and the reply unit are
+// one thing.
+//
+// The page is also the trigger. Finishing a checkbox line, an `@` line, or a
+// line ending in `?` (Enter), ticking a box, or opening the page hands the
+// block to `student-agent`, after the save has landed on disk. The agent mark
+// in the header brightens while a run is in flight and turns accent when a
+// reply is waiting for a block that is still in the note.
 Item {
   id: root
 
@@ -44,13 +51,31 @@ Item {
   property string dateLabel: ""
   property bool applying: false
 
+  // Runner plumbing.
+  property var queuedRun: null
+  property bool running: false
+  property bool openPassPending: false
+  property var agentState: ({})
+  property bool replyWaiting: false
+  property int tickedCount: 0
+
+  readonly property color accent: Color.accent
+
   readonly property string problem: svc.configError || svc.error
 
   function open(payloadJson) {
     root.opened = true
     root.dateLabel = Qt.formatDate(new Date(), "dddd d MMMM")
+    root.openPassPending = true
     svc.openToday()
+    if (svc.ready) root.openPass()
     Qt.callLater(function () { editor.forceActiveFocus() })
+  }
+
+  function openPass() {
+    if (!root.openPassPending) return
+    root.openPassPending = false
+    root.requestRun("open", "")
   }
 
   function close() {
@@ -75,7 +100,59 @@ Item {
     root.applying = true
     editor.text = t
     root.applying = false
+    root.tickedCount = root.countTicked(t)
     editor.cursorPosition = editor.length
+    root.refreshReplyWaiting()
+  }
+
+  function countTicked(t) {
+    var m = t.match(/^\s*[-*+] \[[xX]\] /gm)
+    return m ? m.length : 0
+  }
+
+  // Which trigger, if any, a just-completed line is.
+  function triggerFor(lineText) {
+    var t = lineText.trim()
+    if (/^@/.test(t)) return "mention"
+    if (/^[-*+] \[ \] \S/.test(t)) return "checkbox"
+    if (/\?$/.test(t)) return "question"
+    return ""
+  }
+
+  function hashOfLine(lineIndex) {
+    var blocks = Blocks.split(editor.text)
+    var k = Blocks.blockAt(blocks, lineIndex)
+    return k < 0 ? "" : blocks[k].hash
+  }
+
+  // Hand a block to the runner once the note is on disk. One run at a time;
+  // a request that arrives mid-run waits and the last one wins.
+  function requestRun(trigger, hash) {
+    root.flush()
+    root.queuedRun = { trigger: trigger, hash: hash }
+    if (!svc.saving) root.launchQueued()
+  }
+
+  function launchQueued() {
+    if (!root.queuedRun || root.running || svc.saving) return
+    var r = root.queuedRun
+    root.queuedRun = null
+    var cmd = [svc.runner, "run", "--trigger", r.trigger]
+    if (r.hash) cmd.push("--hash", r.hash)
+    root.running = true
+    runner.command = cmd
+    runner.running = true
+  }
+
+  function refreshReplyWaiting() {
+    var st = root.agentState && root.agentState.blocks
+    if (!st) { root.replyWaiting = false; return }
+    var blocks = Blocks.split(editor.text)
+    for (var i = 0; i < blocks.length; i++) {
+      var rec = st[blocks[i].hash]
+      if (rec && rec.state === "reply") { root.replyWaiting = true; return }
+    }
+    root.replyWaiting = false
   }
 
   function flush() {
@@ -96,20 +173,26 @@ Item {
   function handleReturn() {
     var pos = editor.cursorPosition
     var line = root.lineBounds(pos)
+    var lineIndex = root.lineIndexAt(pos)
+    var trigger = root.triggerFor(line.text)
     var m = line.text.match(/^(\s*)([-*+]\s(\[[ xX]\]\s)?|(\d+)([.)])\s)(.*)$/)
     if (!m) {
       editor.insert(pos, "\n")
-      return
+    } else {
+      var content = m[6]
+      if (content === "" && pos >= line.end) {
+        editor.remove(line.start, line.end)
+        return
+      }
+      var marker = m[2]
+      if (m[3]) marker = m[2].replace(/\[[xX]\]/, "[ ]")
+      else if (m[4]) marker = (parseInt(m[4], 10) + 1) + m[5] + " "
+      editor.insert(pos, "\n" + m[1] + marker)
     }
-    var content = m[6]
-    if (content === "" && pos >= line.end) {
-      editor.remove(line.start, line.end)
-      return
+    if (trigger !== "") {
+      var hash = root.hashOfLine(lineIndex)
+      if (hash !== "") root.requestRun(trigger, hash)
     }
-    var marker = m[2]
-    if (m[3]) marker = m[2].replace(/\[[xX]\]/, "[ ]")
-    else if (m[4]) marker = (parseInt(m[4], 10) + 1) + m[5] + " "
-    editor.insert(pos, "\n" + m[1] + marker)
   }
 
   function lineIndexAt(pos) {
@@ -147,8 +230,39 @@ Item {
 
   Service {
     id: svc
-    onLoaded: root.applyText(svc.body)
+    onLoaded: { root.applyText(svc.body); root.openPass() }
     onExternalChange: root.applyText(svc.body)
+    onSavedNow: root.launchQueued()
+  }
+
+  Process {
+    id: runner
+    stderr: StdioCollector {
+      onStreamFinished: if (text.trim() !== "") console.warn("student.page runner: " + text.trim())
+    }
+    stdout: StdioCollector {
+      onStreamFinished: if (text.trim() !== "") console.log("student.page runner: " + text.trim())
+    }
+    onExited: function (code, status) {
+      root.running = false
+      stateFile.reload()
+      root.launchQueued()
+    }
+  }
+
+  // The runner's state file for today: which blocks it saw, which have a
+  // reply. Read-only here; the runner writes it atomically.
+  FileView {
+    id: stateFile
+    path: svc.statePath
+    watchChanges: true
+    printErrors: false
+    onLoaded: {
+      try { root.agentState = JSON.parse(text()) } catch (e) { root.agentState = ({}) }
+      root.refreshReplyWaiting()
+    }
+    onLoadFailed: { root.agentState = ({}); root.replyWaiting = false }
+    onFileChanged: reload()
   }
 
   Timer {
@@ -229,9 +343,10 @@ Item {
               anchors.verticalCenter: parent.verticalCenter
               textFormat: Text.PlainText
               text: "agent"
-              color: root.faint
+              color: root.replyWaiting ? root.accent : (root.running ? root.foreground : root.faint)
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
+              Behavior on color { ColorAnimation { duration: 240 } }
             }
 
             // Saved / unsaved, as quietly as possible: a dot that brightens
@@ -303,6 +418,13 @@ Item {
               if (root.applying) return
               svc.markPending(text)
               saveTimer.restart()
+              var ticked = root.countTicked(text)
+              if (ticked > root.tickedCount) {
+                var hash = root.hashOfLine(root.lineIndexAt(editor.cursorPosition))
+                if (hash !== "") root.requestRun("tick", hash)
+              }
+              root.tickedCount = ticked
+              root.refreshReplyWaiting()
             }
 
             Keys.priority: Keys.BeforeItem

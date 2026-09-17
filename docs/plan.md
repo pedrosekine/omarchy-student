@@ -123,7 +123,12 @@
             checkbox line → prompt → yes → proposal → Enter → deadline #5 in
             the store (then removed). Gotcha: copying a QML file into the
             plugins dir closes the running overlay even though the code is
-            not replaced; restart the shell instead.
+            not replaced; restart the shell instead. Revised after use: a
+            checkbox list is one submission, staged when the list is left
+            (runner takes `--hash h1,h2,…`, one record per item sharing a
+            `group`); the margin is on-demand only (`Alt+Right`/`Ctrl+T`);
+            the send prompt is a washed line under the cursor; `- []`
+            autocorrects to `- [ ] `.
       - [ ] 14.5 knowledge — profile/subjects/patterns, intention→outcome,
             suggestions with evidence, curriculum folder.
       - [ ] 14.6 rendering — headings, checkboxes, private callouts in the page.

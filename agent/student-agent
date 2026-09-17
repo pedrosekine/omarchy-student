@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """student-agent — the loop between today's note and the model.
 
-    student-agent run --trigger <kind> [--hash <block>] [--date YYYY.MM.DD]
+    student-agent run --trigger <kind> [--hash <block>[,<block>…]] [--date YYYY.MM.DD]
     student-agent chat --hash <block> --message <text>         # dive in: continue that block's session
     student-agent ack --hash <block>                           # the student has seen the reply
     student-agent accept --hash <block> --index <n>            # run a proposal through the CLI
@@ -210,13 +210,14 @@ def language_line(cfg: dict, sample: str = "") -> str:
     return line
 
 
-def build_payload(paths: Paths, trigger: str, block: dict | None, visible: list[dict], cfg: dict | None = None) -> str:
-    sample = block["text"] if block is not None else "\n".join(b["text"] for b in visible[-3:])
+def build_payload(paths: Paths, trigger: str, fired: list[dict], visible: list[dict], cfg: dict | None = None) -> str:
+    sample = "\n".join(b["text"] for b in fired) if fired else "\n".join(b["text"] for b in visible[-3:])
     parts = ["# Language", language_line(cfg or {}, sample), "", "# Trigger", f"kind: {trigger}"]
-    if block is not None:
-        parts.append(f"block: {block['hash']}")
+    if fired:
+        parts.append("block: " + ",".join(b["hash"] for b in fired)
+                     + (" (a list; treat the items as one submission)" if len(fired) > 1 else ""))
         parts.append("")
-        parts.append("\n".join("> " + l for l in block["text"].split("\n")))
+        parts.append("\n".join("> " + l for b in fired for l in b["text"].split("\n")))
     parts += ["", "# Today's note (private parts removed)", ""]
     parts.append("\n\n".join(b["text"] for b in visible) or "(empty)")
 
@@ -315,34 +316,48 @@ def parse_reply(text: str) -> dict:
 
 # ------------------------------------------------------------------- apply
 
-def apply(cfg: dict, paths: Paths, trigger: str, block: dict | None, visible: list[dict],
+def group_of(state: dict, hash_: str) -> list[str]:
+    """A list submission shares one record across its items."""
+    rec = state["blocks"].get(hash_) or {}
+    g = rec.get("group")
+    return [h for h in g if h in state["blocks"]] if isinstance(g, list) and hash_ in g else [hash_]
+
+
+def apply(cfg: dict, paths: Paths, trigger: str, fired: list[dict], visible: list[dict],
           result: dict, reply: dict, payload_file: Path, hash_: str = "", message: str = "") -> dict:
     now = dt.datetime.now()
     at = now.isoformat(timespec="seconds")
     state = load_state(paths)
-    if block:
-        hash_ = block["hash"]
+    hashes = [b["hash"] for b in fired] if fired else ([hash_] if hash_ else [])
+    if fired:
+        hash_ = fired[0]["hash"]
     chat = trigger == "chat"
 
-    # Every block the model saw is now "seen"; the fired one gets the reply.
+    # Every block the model saw is now "seen"; the fired ones get the reply.
     for b in visible:
         state["blocks"].setdefault(b["hash"], {"state": "seen", "at": at})
     if chat:
-        rec = state["blocks"].setdefault(hash_, {"state": "seen", "at": at})
-        turns = rec.setdefault("chat", [])
-        turns.append({"role": "student", "text": message, "at": at})
-        turns.append({"role": "agent", "text": reply["reply"], "at": at, "cost": result["cost"]})
-        rec["session"] = result["session"] or rec.get("session", "")
-        rec["read"] = False
-        if rec.get("state") != "reply":
-            rec["state"] = "reply"
-            rec["reply"] = rec.get("reply") or ""
-        rec["proposals"] = rec.get("proposals", []) + reply["proposals"]
-    elif block:
-        rec = state["blocks"].setdefault(hash_, {})
-        rec.update({"state": "reply" if reply["reply"] else "seen", "trigger": trigger,
-                    "reply": reply["reply"], "proposals": reply["proposals"], "read": False,
-                    "session": result["session"], "at": at, "cost": result["cost"]})
+        for h in group_of(state, hash_):
+            rec = state["blocks"].setdefault(h, {"state": "seen", "at": at})
+            turns = rec.setdefault("chat", [])
+            turns.append({"role": "student", "text": message, "at": at})
+            turns.append({"role": "agent", "text": reply["reply"], "at": at, "cost": result["cost"]})
+            rec["session"] = result["session"] or rec.get("session", "")
+            rec["read"] = False
+            if rec.get("state") != "reply":
+                rec["state"] = "reply"
+                rec["reply"] = rec.get("reply") or ""
+            rec["proposals"] = rec.get("proposals", []) + reply["proposals"]
+    elif fired:
+        for h in hashes:
+            rec = state["blocks"].setdefault(h, {})
+            rec.update({"state": "reply" if reply["reply"] else "seen", "trigger": trigger,
+                        "reply": reply["reply"], "proposals": reply["proposals"], "read": False,
+                        "session": result["session"], "at": at, "cost": result["cost"]})
+            if len(hashes) > 1:
+                rec["group"] = hashes
+            else:
+                rec.pop("group", None)
     elif reply["reply"]:
         state.setdefault("observations", []).append({"text": reply["reply"], "at": at, "trigger": trigger,
                                                      "session": result["session"], "read": False})
@@ -365,9 +380,9 @@ def apply(cfg: dict, paths: Paths, trigger: str, block: dict | None, visible: li
     if not paths.transcript.exists():
         append_text(paths, paths.transcript,
                     f"# {paths.stamp} — agent\n\nNote: [[{paths.daily_dir.relative_to(paths.vault)}/{paths.stamp}]]\n")
-    sec = [f"\n## {now.strftime('%H:%M')} · {trigger}" + (f" · `{hash_}`" if hash_ else ""), ""]
-    if block and not chat:
-        sec += ["> " + l for l in block["text"].split("\n")] + [""]
+    sec = [f"\n## {now.strftime('%H:%M')} · {trigger}" + (f" · `{','.join(hashes)}`" if hashes else ""), ""]
+    if fired and not chat:
+        sec += ["> " + l for b in fired for l in b["text"].split("\n")] + [""]
     if chat:
         sec += [f"**you:** {message}", "", f"**agent:** {reply['reply'] or '_(nothing to add)_'}"]
     else:
@@ -395,7 +410,7 @@ def apply(cfg: dict, paths: Paths, trigger: str, block: dict | None, visible: li
 
 # ---------------------------------------------------------------- commands
 
-def prepare(cfg: dict, args) -> tuple[Paths, list[dict], dict | None]:
+def prepare(cfg: dict, args) -> tuple[Paths, list[dict], list[dict]]:
     date = dt.datetime.strptime(args.date, moment_to_strftime(cfg["daily"].get("format", "YYYY-MM-DD"))).date() \
         if args.date else dt.date.today()
     paths = Paths(cfg, date)
@@ -407,43 +422,45 @@ def prepare(cfg: dict, args) -> tuple[Paths, list[dict], dict | None]:
     if note_is_private(blks):
         raise Fail("today is marked agent: false")
     visible = visible_blocks(blks)
-    block = None
+    fired = []
     if args.hash:
-        block = next((b for b in visible if b["hash"] == args.hash), None)
-        if block is None:
-            raise Fail(f"block {args.hash} is not in the visible note (edited, private, or gone)")
+        for h in [x for x in args.hash.split(",") if x]:
+            b = next((b for b in visible if b["hash"] == h), None)
+            if b is None:
+                raise Fail(f"block {h} is not in the visible note (edited, private, or gone)")
+            fired.append(b)
     elif args.trigger != "open":
         raise Fail("--hash is required for every trigger except open")
-    return paths, visible, block
+    return paths, visible, fired
 
 
 def cmd_context(cfg: dict, args) -> int:
-    paths, visible, block = prepare(cfg, args)
-    sys.stdout.write(build_payload(paths, args.trigger, block, visible, cfg))
+    paths, visible, fired = prepare(cfg, args)
+    sys.stdout.write(build_payload(paths, args.trigger, fired, visible, cfg))
     return 0
 
 
 def cmd_run(cfg: dict, args) -> int:
-    paths, visible, block = prepare(cfg, args)
+    paths, visible, fired = prepare(cfg, args)
     if args.trigger == "open":
         known = load_state(paths)["blocks"]
         if all(b["hash"] in known for b in visible):
             print("open: nothing new since the last pass")
             return 0
-    payload = build_payload(paths, args.trigger, block, visible, cfg)
+    payload = build_payload(paths, args.trigger, fired, visible, cfg)
     paths.payloads.mkdir(parents=True, exist_ok=True)
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    payload_file = paths.payloads / f"{stamp}-{args.trigger}-{block['hash'] if block else 'open'}.md"
+    payload_file = paths.payloads / f"{stamp}-{args.trigger}-{fired[0]['hash'] if fired else 'open'}.md"
     payload_file.write_text(payload)
     result = run_model(cfg, paths, payload)
     payload_file.with_suffix(".events.jsonl").write_text(result["events"])
     reply = parse_reply(result["text"]) if not result["error"] else \
         {"reply": "", "proposals": [], "suggestions": [], "knowledge": []}
-    apply(cfg, paths, args.trigger, block, visible, result, reply, payload_file)
+    apply(cfg, paths, args.trigger, fired, visible, result, reply, payload_file)
     if result["error"]:
         print(f"error: {result['error']}", file=sys.stderr)
         return 1
-    print(f"{args.trigger} {block['hash'] if block else ''}: "
+    print(f"{args.trigger} {','.join(b['hash'] for b in fired)}: "
           f"{'reply' if reply['reply'] else 'silent'} · ${result['cost']:.4f} · {result['tokens']['total']} tokens")
     return 0
 
@@ -481,14 +498,14 @@ def cmd_chat(cfg: dict, args) -> int:
     else:
         if block is None:
             raise Fail(f"block {args.hash} has no session and is not in the visible note")
-        payload = build_payload(paths, "mention", block, visible, cfg)
+        payload = build_payload(paths, "mention", [block], visible, cfg)
         payload += f"\n# The student says\n\n{message}\n"
         payload_file.write_text(payload)
         result = run_model(cfg, paths, payload)
     payload_file.with_suffix(".events.jsonl").write_text(result["events"])
     reply = parse_reply(result["text"]) if not result["error"] else \
         {"reply": "", "proposals": [], "suggestions": [], "knowledge": []}
-    apply(cfg, paths, "chat", None, visible, result, reply, payload_file, hash_=args.hash, message=message)
+    apply(cfg, paths, "chat", [], visible, result, reply, payload_file, hash_=args.hash, message=message)
     if result["error"]:
         print(f"error: {result['error']}", file=sys.stderr)
         return 1
@@ -579,11 +596,14 @@ def cmd_ack(cfg: dict, args) -> int:
         if args.date else dt.date.today()
     paths = Paths(cfg, date)
     state = load_state(paths)
-    rec = state["blocks"].get(args.hash)
-    if not rec or rec.get("read"):
-        return 0
-    rec["read"] = True
-    write_atomic(paths, paths.state, json.dumps(state, indent=2, ensure_ascii=False) + "\n")
+    changed = False
+    for h in group_of(state, args.hash):
+        rec = state["blocks"].get(h)
+        if rec and not rec.get("read"):
+            rec["read"] = True
+            changed = True
+    if changed:
+        write_atomic(paths, paths.state, json.dumps(state, indent=2, ensure_ascii=False) + "\n")
     return 0
 
 

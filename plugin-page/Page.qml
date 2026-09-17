@@ -21,22 +21,26 @@ import "Blocks.js" as Blocks
 //
 // The page is also the trigger, but never by accident. A block reaches the
 // agent only when it carries a sign for it — a checkbox, an `@`, a `?` —
-// and the student says so. Finishing such a line with Enter *stages* the
-// block (hollow gutter mark) and offers a small prompt in the margin that
-// defaults to no: Enter again or Esc ignores it, an arrow then Enter sends.
-// Ctrl+Enter sends the staged block under the cursor at any later moment.
-// A block without a sign never goes. Opening the page runs one automatic
-// pass so answers are waiting when you come back.
+// and the student says so. Finishing an `@` or `?` line with Enter *stages*
+// the block (hollow gutter mark) and shows a washed prompt under the cursor
+// that defaults to no: Enter again or Esc ignores it, an arrow then Enter
+// sends. A checkbox list is the special case: Enter just gives the next
+// bullet; the whole run of items is staged as one submission when you
+// leave the list (Enter on an empty bullet). Ctrl+Enter sends the staged
+// block or list under the cursor at any later moment. A block without a
+// sign never goes. Opening the page runs one automatic pass so answers are
+// waiting when you come back.
 //
 // The agent's answers are painted, never inserted: a block the agent has
 // seen is veiled a little; a block with a reply carries a filled mark in
-// the gutter, accent until you have looked at it. The margin to the right
-// shows the reply for the block under the cursor. Alt+Right goes into the
-// margin: proposals first (Enter accepts one — local code runs the CLI, the
-// model never does), then the chat about that block; Alt+Left or Esc comes
-// back. Ctrl+T opens the tasks panel: every open checkbox across the daily
-// notes, last seven days open, older collapsed; Enter ticks one, in the
-// original note, because the page is the one program that edits notes.
+// the gutter, accent until you have looked at it. Nothing else is on
+// screen until asked: Alt+Right opens the margin for the block under the
+// cursor — the reply, its proposals (Enter accepts one; local code runs the
+// CLI, the model never does), and the chat about that block; Alt+Left or
+// Esc closes it again. Ctrl+T opens the tasks panel in the same place:
+// every open checkbox across the daily notes, last seven days open, older
+// collapsed; Enter ticks one, in the original note, because the page is
+// the one program that edits notes.
 Item {
   id: root
 
@@ -77,8 +81,9 @@ Item {
 
   // What is painted and what the margin shows.
   property var paint: []
-  property var staged: ({})      // hash -> trigger, waiting for Ctrl+Enter
-  property var ask: null         // { hash, trigger, yes } — the prompt after Enter
+  property var staged: ({})      // hash -> { trigger, group: [hashes] }, waiting for Ctrl+Enter
+  property var ask: null         // { hashes, trigger, yes } — the prompt after Enter
+  property bool marginOpen: false
   property int marginFocus: -1   // -1 note; 0..n-1 proposal rows; n = chat field
   property bool tasksOpen: false
   property var tasks: []
@@ -86,7 +91,7 @@ Item {
   property int taskFocus: 0
   property string currentHash: ""
   readonly property var currentRecord: agent.record(currentHash)
-  readonly property string currentStaged: staged[currentHash] || ""
+  readonly property var currentStaged: staged[currentHash] || null
   readonly property var currentProposals: (currentRecord && currentRecord.proposals) ? currentRecord.proposals : []
   readonly property var taskRows: root.buildTaskRows()
   readonly property bool replyWaiting: root.hasUnreadInNote()
@@ -182,19 +187,18 @@ Item {
     root.enqueue(cmd, hash)
   }
 
-  function stage(trigger, hash) {
-    if (hash === "") return
+  function stage(trigger, hashes) {
+    if (!hashes || hashes.length === 0) return
     var next = ({})
     for (var k in root.staged) next[k] = root.staged[k]
-    next[hash] = trigger
+    for (var i = 0; i < hashes.length; i++) next[hashes[i]] = { trigger: trigger, group: hashes }
     root.staged = next
     root.scheduleRepaint()
   }
 
-  function unstage(hash) {
-    if (!root.staged[hash]) return
+  function unstage(hashes) {
     var next = ({})
-    for (var k in root.staged) if (k !== hash) next[k] = root.staged[k]
+    for (var k in root.staged) if (hashes.indexOf(k) < 0) next[k] = root.staged[k]
     root.staged = next
   }
 
@@ -204,20 +208,44 @@ Item {
   function sendCurrent() {
     var hash = root.currentHash
     if (hash === "") return
-    var trigger = root.staged[hash] || root.triggerForBlock(hash)
+    var st = root.staged[hash]
+    if (st) { root.send(st.trigger, st.group); return }
+    var trigger = root.triggerForBlock(hash)
     if (!trigger) { root.noSignHint = true; hintTimer.restart(); return }
-    root.send(trigger, hash)
+    root.send(trigger, trigger === "checkbox" ? root.listAround(hash) : [hash])
   }
 
-  function send(trigger, hash) {
+  function send(trigger, hashes) {
     root.ask = null
-    root.unstage(hash)
-    root.requestRun(trigger, hash)
+    root.unstage(hashes)
+    root.requestRun(trigger, hashes.join(","))
   }
 
-  function askAbout(trigger, hash) {
-    if (hash === "") return
-    root.ask = { hash: hash, trigger: trigger, yes: false }
+  function askAbout(trigger, hashes) {
+    if (!hashes || hashes.length === 0) return
+    root.ask = { hashes: hashes, trigger: trigger, yes: false }
+  }
+
+  // The run of adjacent list items around a block: no blank line between
+  // them, all top-level items. One list, one submission.
+  function listAround(hash) {
+    var blocks = Blocks.split(editor.text)
+    var k = -1
+    for (var i = 0; i < blocks.length; i++) if (blocks[i].hash === hash) { k = i; break }
+    if (k < 0 || blocks[k].kind !== "item") return [hash]
+    var lo = k, hi = k
+    while (lo > 0 && blocks[lo - 1].kind === "item" && blocks[lo - 1].end === blocks[lo].start) lo--
+    while (hi < blocks.length - 1 && blocks[hi + 1].kind === "item" && blocks[hi + 1].start === blocks[hi].end) hi++
+    var out = []
+    for (var j = lo; j <= hi; j++) out.push(blocks[j].hash)
+    return out
+  }
+
+  function listHasCheckbox(hashes) {
+    var blocks = Blocks.split(editor.text)
+    for (var i = 0; i < blocks.length; i++)
+      if (hashes.indexOf(blocks[i].hash) >= 0 && /^\s*[-*+] \[ \] \S/m.test(blocks[i].text)) return true
+    return false
   }
 
   function dropAsk() { root.ask = null }
@@ -227,12 +255,12 @@ Item {
     if (!root.ask) return false
     var k = event.key
     if (k === Qt.Key_Left || k === Qt.Key_Right || k === Qt.Key_Up || k === Qt.Key_Down || k === Qt.Key_Tab) {
-      root.ask = { hash: root.ask.hash, trigger: root.ask.trigger, yes: !root.ask.yes }
+      root.ask = { hashes: root.ask.hashes, trigger: root.ask.trigger, yes: !root.ask.yes }
       return true
     }
     if (k === Qt.Key_Escape) { root.dropAsk(); return true }
     if (k === Qt.Key_Return || k === Qt.Key_Enter) {
-      if (root.ask.yes) { root.send(root.ask.trigger, root.ask.hash); return true }
+      if (root.ask.yes) { root.send(root.ask.trigger, root.ask.hashes); return true }
       root.dropAsk()
       return false   // a plain Enter: let it fall through and behave as usual
     }
@@ -369,7 +397,16 @@ Item {
     } else {
       var content = m[6]
       if (content === "" && pos >= line.end) {
+        // Leaving the list. If it carried checkboxes, the whole run of
+        // items is one submission.
         editor.remove(line.start, line.end)
+        if (lineIndex > 0) {
+          var prev = root.hashOfLine(lineIndex - 1)
+          if (prev !== "") {
+            var group = root.listAround(prev)
+            if (root.listHasCheckbox(group)) { root.stage("checkbox", group); root.askAbout("checkbox", group) }
+          }
+        }
         return
       }
       var marker = m[2]
@@ -377,15 +414,16 @@ Item {
       else if (m[4]) marker = (parseInt(m[4], 10) + 1) + m[5] + " "
       editor.insert(pos, "\n" + m[1] + marker)
     }
-    if (trigger !== "") {
+    if (trigger !== "" && trigger !== "checkbox") {
       var hash = root.hashOfLine(lineIndex)
-      root.stage(trigger, hash)
-      root.askAbout(trigger, hash)
+      root.stage(trigger, [hash])
+      root.askAbout(trigger, [hash])
     }
   }
 
   function diveIn() {
-    if (!root.currentRecord || root.marginWidth <= 0) return
+    if (root.marginWidth <= 0 || root.currentHash === "") return
+    root.marginOpen = true
     if (root.currentProposals.length > 0) {
       root.marginFocus = 0
       marginKeys.forceActiveFocus()
@@ -397,6 +435,7 @@ Item {
 
   function backToNote() {
     root.marginFocus = -1
+    root.marginOpen = false
     root.tasksOpen = false
     editor.forceActiveFocus()
   }
@@ -421,11 +460,12 @@ Item {
   function toggleTasks() {
     root.tasksOpen = !root.tasksOpen
     if (root.tasksOpen) {
+      root.marginOpen = true
       root.taskFocus = 0
       root.refreshTasks()
       marginKeys.forceActiveFocus()
     } else {
-      editor.forceActiveFocus()
+      root.backToNote()
     }
   }
 
@@ -760,7 +800,10 @@ Item {
               svc.markPending(text)
               saveTimer.restart()
               var ticked = root.countTicked(text)
-              if (ticked > root.tickedCount) root.stage("tick", root.hashOfLine(root.lineIndexAt(editor.cursorPosition)))
+              if (ticked > root.tickedCount) {
+                var th = root.hashOfLine(root.lineIndexAt(editor.cursorPosition))
+                if (th !== "") root.stage("tick", root.listAround(th))
+              }
               root.tickedCount = ticked
               root.scheduleRepaint()
             }
@@ -782,6 +825,13 @@ Item {
               } else if (event.key === Qt.Key_Tab) {
                 editor.insert(editor.cursorPosition, "\t")
                 event.accepted = true
+              } else if (event.text === "]") {
+                // "- []" is what fingers type; "- [ ] " is what markdown wants.
+                var lb = root.lineBounds(editor.cursorPosition)
+                if (/^\s*[-*+] \[$/.test(editor.text.substring(lb.start, editor.cursorPosition))) {
+                  editor.insert(editor.cursorPosition, " ] ")
+                  event.accepted = true
+                }
               } else if (event.key === Qt.Key_Up && alt) {
                 root.jumpBlock(-1)
                 event.accepted = true
@@ -802,6 +852,27 @@ Item {
                 event.accepted = true
               }
             }
+          }
+
+          // The gentle prompt after Enter on a signed line, and the
+          // no-sign hint: washed text just under the cursor, gone as soon
+          // as you type.
+          Text {
+            visible: !!root.ask || root.noSignHint
+            x: root.gutter
+            y: editor.cursorRectangle.y + editor.cursorRectangle.height + Style.space(2)
+            width: editor.width
+            textFormat: Text.PlainText
+            wrapMode: Text.WordWrap
+            text: root.noSignHint
+              ? "no sign for the agent on this block — start a line with @, make it a checkbox, or end it with ?"
+              : (root.ask && root.ask.yes
+                ? "send to agent?  no   [yes]   · Enter sends"
+                : "send to agent?  [no]   yes   · → then Enter sends, Enter or Esc ignores")
+            color: root.faint
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            z: 2
           }
 
           // The veil: blocks the agent has seen, and has nothing to say
@@ -830,7 +901,7 @@ Item {
     // and the field to talk back.
     BorderSurface {
       id: margin
-      visible: root.marginWidth > 0 && root.problem === "" && (root.tasksOpen || !!root.currentRecord || root.currentStaged !== "" || !!root.ask || root.noSignHint)
+      visible: root.marginWidth > 0 && root.problem === "" && root.marginOpen
       anchors.left: sheet.right
       anchors.leftMargin: root.marginGap
       anchors.top: sheet.top
@@ -971,71 +1042,6 @@ Item {
           width: parent.width
           spacing: Style.space(12)
 
-          // The gentle prompt after Enter on a line with a sign. Defaults
-          // to no; an arrow flips it, Enter confirms, Esc or typing ignores.
-          Column {
-            width: parent.width
-            visible: !!root.ask
-            spacing: Style.space(6)
-
-            Text {
-              width: parent.width
-              textFormat: Text.PlainText
-              wrapMode: Text.WordWrap
-              text: "Send this to the agent?"
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
-            }
-
-            Row {
-              spacing: Style.space(8)
-              Repeater {
-                model: [{ label: "no", yes: false }, { label: "yes", yes: true }]
-                Rectangle {
-                  required property var modelData
-                  readonly property bool hot: !!root.ask && root.ask.yes === modelData.yes
-                  width: optLabel.implicitWidth + Style.space(16)
-                  height: optLabel.implicitHeight + Style.space(8)
-                  radius: Style.cornerRadius
-                  color: hot ? Style.selectedFill : "transparent"
-                  border.width: 1
-                  border.color: hot ? root.accent : root.faint
-                  Text {
-                    id: optLabel
-                    anchors.centerIn: parent
-                    textFormat: Text.PlainText
-                    text: modelData.label
-                    color: hot ? root.foreground : root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.bodySmall
-                  }
-                }
-              }
-            }
-
-            Text {
-              width: parent.width
-              textFormat: Text.PlainText
-              wrapMode: Text.WordWrap
-              text: "→ then Enter sends · Enter or Esc ignores"
-              color: root.faint
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-            }
-          }
-
-          Text {
-            width: parent.width
-            visible: root.noSignHint
-            textFormat: Text.PlainText
-            wrapMode: Text.WordWrap
-            text: "This block has no sign for the agent. Start a line with @, make it a checkbox, or end it with ?"
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.bodySmall
-          }
-
           Text {
             width: parent.width
             visible: root.running && root.runningHash === root.currentHash && root.currentHash !== ""
@@ -1110,15 +1116,13 @@ Item {
 
           Text {
             width: parent.width
-            visible: !root.ask && !chatField.activeFocus && (root.currentStaged !== "" || !!(root.currentRecord && root.currentRecord.state === "reply"))
+            visible: !root.currentRecord || !root.currentRecord.reply
             textFormat: Text.PlainText
             wrapMode: Text.WordWrap
-            text: root.currentStaged !== ""
-              ? "Ctrl+Enter sends this to the agent"
-              : (root.currentProposals.length > 0 ? "Alt+Right: accept a proposal or talk about this" : "Alt+Right to talk about this")
+            text: root.currentStaged ? "Staged. Ctrl+Enter sends it, or ask below." : "Nothing from the agent on this block yet. Ask below."
             color: root.faint
             font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
+            font.pixelSize: Style.font.bodySmall
           }
         }
       }
@@ -1138,7 +1142,7 @@ Item {
           id: chatField
           anchors.left: parent.left
           anchors.right: parent.right
-          visible: !!root.currentRecord && !root.tasksOpen
+          visible: root.marginOpen && !root.tasksOpen
           placeholderText: "…"
           font.family: root.fontFamily
           font.pixelSize: Style.font.body

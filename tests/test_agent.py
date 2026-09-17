@@ -198,7 +198,23 @@ def main() -> int:
         check(r.returncode != 0, "missing proposal index refused")
         check(t.note.read_bytes() == before[0], "note untouched after accept")
 
-        # 8. tasks: open checkboxes across days, today recent, old collapsed
+        # 8. a list submission: several hashes, one record each, shared group
+        t.note.write_text(NOTE + "\n- [ ] alpha\n- [ ] beta\n")
+        b2 = blocks.split(t.note.read_text())
+        items = [b["hash"] for b in b2 if b["text"] in ("- [ ] alpha", "- [ ] beta")]
+        t.set_reply(reply="Two tasks, no dates.")
+        r = t.agent("run", "--trigger", "checkbox", "--hash", ",".join(items), "--date", "2026.09.17")
+        check(r.returncode == 0, f"grouped run exits 0 ({r.stderr.strip()})")
+        sent = (t.stub_dir / "last_payload.md").read_text()
+        check("> - [ ] alpha\n> - [ ] beta" in sent and "one submission" in sent, "both items quoted as one submission")
+        s = json.loads(st.read_text())
+        check(all(s["blocks"][h]["state"] == "reply" and s["blocks"][h]["group"] == items for h in items), "reply on every item, group recorded")
+        r = t.agent("ack", "--hash", items[1], "--date", "2026.09.17")
+        s = json.loads(st.read_text())
+        check(all(s["blocks"][h]["read"] is True for h in items), "ack on one item reads the whole group")
+        t.note.write_text(NOTE)
+
+        # 9. tasks: open checkboxes across days, today recent, old collapsed
         old = t.daily / "2026.08.01.md"
         old.write_text("- [ ] ancient task\n- [x] done task\n")
         r = t.agent("tasks")
@@ -207,7 +223,7 @@ def main() -> int:
         check(tasks[0]["recent"] is True and tasks[1]["recent"] is False, "recent flag by age")
         check(tasks[0]["line"] == 7, "line index points at the checkbox line")
 
-        # 9. stray editor: hash of an edited block no longer matches → refused, no run
+        # 10. stray editor: hash of an edited block no longer matches → refused, no run
         t.note.write_text(NOTE)
         r = t.agent("run", "--trigger", "question", "--hash", "deadbeef", "--date", "2026.09.17")
         check(r.returncode != 0, "unknown block hash refused")

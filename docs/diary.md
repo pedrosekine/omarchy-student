@@ -107,12 +107,18 @@ hides the day. Both are removed by local code before the payload is built.
 things must both be true for a block to reach the model: it carries a
 **sign** for the agent, and the student **says so**.
 - The signs: a checkbox line (`- [ ] …`), a line starting with `@`, a line
-  ending with `?`, a tick. Finishing such a line with Enter **stages** the
-  block — hollow accent mark in the gutter — and shows a small prompt in the
-  margin, "Send this to the agent?", with *no* preselected. Enter again or
+  ending with `?`, a tick. Finishing an `@` or `?` line with Enter
+  **stages** the block — hollow accent mark in the gutter — and shows a
+  washed prompt under the cursor, "send to agent? [no] yes". Enter again or
   Esc ignores it and the page behaves as usual; an arrow then Enter sends.
-- `Ctrl+Enter` sends the staged block under the cursor at any later moment.
-  On a block without a sign it sends nothing and the margin says why.
+- **A checkbox list is one submission.** Enter on an item just gives the
+  next bullet. Leaving the list (Enter on an empty bullet) stages the whole
+  run of adjacent items as a group with one prompt; the reply attaches to
+  every item, so ticking one later does not lose it for the others. A tick
+  stages the list the same way. Typing `- []` becomes `- [ ] `.
+- `Ctrl+Enter` sends the staged block or list under the cursor at any later
+  moment. On a block without a sign it sends nothing and a washed line under
+  the cursor says why.
 - Opening the page runs one automatic pass (skipped when nothing is new), so
   answers are waiting when the student comes back. Its observations have no
   block; they are kept in the state file for the suggestions panel.
@@ -178,6 +184,10 @@ and the ledger; limits are decided from usage, not guessed.
   unchanged on every save. That mark becomes the reply-waiting marker.
 - Blocks painted from the state file: **faded** means seen, a **filled
   mark** means a reply (accent until read), a **hollow mark** means staged.
+  That is all that is on screen while writing. The margin — reply,
+  proposals, chat — exists only while asked for: `Alt+Right` opens it for
+  the block under the cursor, `Alt+Left` or `Esc` closes it. `Ctrl+T` opens
+  the tasks panel in the same place.
   `Alt+Up/Down` move between blocks, `Ctrl+Up/Down` go to the start and
   end of the current block, `Alt+Right` goes into the chat about the
   current block ready to type, `Alt+Left` or `Esc` comes back, `Ctrl+Enter`

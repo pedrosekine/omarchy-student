@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "student.page",
+  "name": "Page",
+  "version": "0.1.0",
+  "author": "student",
+  "description": "Today's note as a blank page in the shell",
+  "kinds": [
+    "overlay"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "overlay": "Page.qml"
+  }
+}

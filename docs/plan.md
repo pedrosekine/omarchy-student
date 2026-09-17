@@ -49,8 +49,20 @@
       QML into `~/.config/omarchy/plugins/` run `omarchy restart shell`.
 - [ ] Step 14 — the diary. Reference plan with files, loop, page, tests and
       phases: `docs/diary.md`. Phases, each shippable alone:
-      - [ ] 14.1 the page — Quickshell panel, today's note, plain text,
-            per-keystroke save, Hypr key, theme-bound, block splitting. No agent.
+      - [x] 14.1 the page — `plugin-page/` (`student.page`, kind `overlay`,
+            keepLoaded). Themed sheet, date, today's note as plain text, save
+            per keystroke (300 ms coalesce, flush on Enter/close, atomic
+            writes), Esc closes, Enter continues list items and checkboxes,
+            Ctrl+Up/Down jump blocks. Block splitting in `Blocks.js` with a
+            Python twin `agent/blocks.py`; `tests/test_blocks.py` cross-checks
+            them. Config: `~/.config/omarchy-student/config.json` (see
+            `config.example.json`). Note created from
+            `<vault>/agents/student/templates/daily.md` by whoever gets there
+            first — the same file is set as Obsidian's daily-notes template.
+            Install: copy to `~/.config/omarchy/plugins/student.page/`, add
+            `{"id":"student.page"}` to `plugins[]` in shell.json, bind
+            `SUPER+ALT+J` → `omarchy-shell shell toggle student.page '{}'`.
+            Gotcha: overlays are toggled via the `shell` target, not their id.
       - [ ] 14.2 the loop — runner (allowlist, payload log, tool-less opencode
             agent, transcript + state), triggered by the page; allowlist and
             no-write tests; `subject`/`link` on deadlines; `--for` on sessions.
@@ -76,6 +88,7 @@ o.bind("SUPER + ALT + P", "Pomo toggle", "pomo toggle")
 o.bind("SUPER + ALT + N", "Pomo skip", "pomo skip")
 o.bind("SUPER + ALT + O", "Pomo popup", "omarchy-shell student.pomo toggle")
 o.bind("SUPER + ALT + D", "Deadlines popup", "omarchy-shell student.deadline toggle")
+o.bind("SUPER + ALT + J", "Page (today's note)", "omarchy-shell shell toggle student.page '{}'")
 ```
 
 ## Decisions

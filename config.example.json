@@ -1,0 +1,9 @@
+{
+  "vault": "/home/you/your-vault",
+  "daily": {
+    "dir": "inbox/Daily",
+    "format": "YYYY.MM.DD",
+    "template": "agents/student/templates/daily"
+  },
+  "agentDir": "agents/student"
+}

@@ -29,6 +29,19 @@ agent reads and answers — reference plan in `docs/diary.md`.
 
 See `docs/plan.md` for full steps.
 
+## The page (phase 14.1)
+
+`plugin-page/` is a full-screen overlay for `omarchy-shell`: today's note as a
+blank sheet in the current theme, saved on every keystroke. `SUPER+ALT+J`
+opens it, `Esc` closes. Needs `~/.config/omarchy-student/config.json` (copy
+`config.example.json`) pointing at your vault; the note lives at
+`<vault>/<daily.dir>/<date>.md` exactly where Obsidian's daily notes would.
+
+```bash
+cp -r plugin-page ~/.config/omarchy/plugins/student.page   # then add {"id":"student.page"} to plugins[] in ~/.config/omarchy/shell.json
+python3 tests/test_blocks.py                                # block splitter, JS and Python must agree (needs node)
+```
+
 ## Pointing an agent at it
 
 Everything is plain files plus one command, no daemon:
